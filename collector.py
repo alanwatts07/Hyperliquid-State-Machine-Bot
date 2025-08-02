@@ -1,94 +1,97 @@
 # Hyperliquid Data Collector (collector.py)
 #
-# This script runs in the background to fetch the price of a specified coin
-# every minute and save it to a JSON file.
+# This script runs in the background to fetch the price of specified coins
+# every minute and save each to a separate JSON file.
 #
 # It includes exponential backoff to handle API rate limiting (429 errors) gracefully.
 #
 # To Run:
 # 1. Save this file as 'collector.py'.
-# 2. Run from your terminal: python collector.py
-# 3. Leave it running. It will create and update 'price_data.json' in the same directory.
+# 2. Make sure you have the hyperliquid-python-sdk installed: pip install hyperliquid-python-sdk
+# 3. Run from your terminal: python collector.py
+# 4. Leave it running. It will create and update the specified JSON files.
 
 import time
 import json
+import os
 from datetime import datetime
 from hyperliquid.info import Info
-import os
 
 # --- Configuration ---
-COIN_TO_TRACK = "SOL"
-DATA_FILE = "price_data.json"
-FETCH_INTERVAL_SECONDS = 60 # Fetch data every 60 seconds (1 minute)
+# List of tuples, where each tuple is (COIN_SYMBOL, FILENAME)
+COINS_TO_TRACK = [
+    ("SOL", "price_data.json"),
+    ("LTC", "ltc_price_data.json")
+]
+FETCH_INTERVAL_SECONDS = 60  # Fetch data every 60 seconds (1 minute)
 
-def load_data():
-    """Loads existing price data from the JSON file."""
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
+def load_data(file_path):
+    """Loads existing price data from a specific JSON file."""
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
             try:
                 return json.load(f)
             except json.JSONDecodeError:
-                return [] # Return empty list if file is empty or corrupted
+                return []  # Return empty list if file is empty or corrupted
     return []
 
-def save_data(data):
-    """Saves the updated price data to the JSON file."""
-    with open(DATA_FILE, 'w') as f:
+def save_data(data, file_path):
+    """Saves the updated price data to a specific JSON file."""
+    with open(file_path, 'w') as f:
         json.dump(data, f, indent=4)
 
 def collect_data():
     """
-    The main function to collect and save price data periodically.
+    The main function to collect and save price data periodically for multiple coins.
     """
     print("--- Data Collector Service ---")
-    print(f"[*] Collecting 1-minute data for: {COIN_TO_TRACK}")
-    print(f"[*] Saving data to: {DATA_FILE}")
+    tracked_coins = [coin for coin, _ in COINS_TO_TRACK]
+    print(f"[*] Collecting 1-minute data for: {', '.join(tracked_coins)}")
     print("[*] Press CTRL+C to stop.")
     print("-" * 30)
 
     info = Info()
-    price_history = load_data()
-    
-    # --- NEW: Variables for exponential backoff ---
-    backoff_time = FETCH_INTERVAL_SECONDS # Start with the default interval
+    # Exponential backoff starts at the default fetch interval
+    backoff_time = FETCH_INTERVAL_SECONDS
 
     try:
         while True:
             try:
-                # Fetch the latest mid-price
+                # Fetch the latest mid-price for all available markets
                 all_mids = info.all_mids()
                 
-                # --- NEW: Reset backoff time on a successful request ---
+                # On a successful API call, reset the backoff timer
                 backoff_time = FETCH_INTERVAL_SECONDS
                 
-                if COIN_TO_TRACK in all_mids:
-                    price = float(all_mids[COIN_TO_TRACK])
-                    timestamp = datetime.now().isoformat()
+                # Iterate through the list of coins we want to track
+                for coin_symbol, data_file in COINS_TO_TRACK:
+                    if coin_symbol in all_mids:
+                        price = float(all_mids[coin_symbol])
+                        timestamp = datetime.now().isoformat()
+                        new_entry = {"timestamp": timestamp, "price": price}
 
-                    new_entry = {"timestamp": timestamp, "price": price}
-                    price_history.append(new_entry)
+                        # Load, update, and save data for this specific coin
+                        price_history = load_data(data_file)
+                        price_history.append(new_entry)
+                        save_data(price_history, data_file)
 
-                    save_data(price_history)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved: {coin_symbol} @ ${price:,.2f} to {data_file}")
+                    else:
+                        print(f"[!] Error: Coin '{coin_symbol}' not found in the API response.")
 
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved: {COIN_TO_TRACK} @ ${price:.2f}")
-
-                else:
-                    print(f"[!] Error: Coin '{COIN_TO_TRACK}' not found.")
-
-            # --- NEW: Catch the specific rate limit error ---
             except Exception as e:
                 # Check if the error is a rate limit error (HTTP 429)
                 if '429' in str(e):
                     print(f"\n[!] Rate limit exceeded (429). Backing off for {backoff_time} seconds...")
                     time.sleep(backoff_time)
                     # Double the backoff time for the next potential failure
-                    backoff_time *= 2 
-                    continue # Skip the rest of the loop and try again
+                    backoff_time = min(backoff_time * 2, 3600) # Cap backoff at 1 hour
+                    continue  # Skip the rest of the loop and try the API call again
                 else:
-                    # Handle other errors
+                    # Handle other unexpected errors
                     print(f"\n[!] An unexpected error occurred: {e}")
             
-            # Wait for the normal interval before the next fetch
+            # Wait for the normal interval before the next fetch cycle
             time.sleep(FETCH_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:
