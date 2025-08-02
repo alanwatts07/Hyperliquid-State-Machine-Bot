@@ -18,7 +18,8 @@ The system is composed of three core Python scripts that must be run simultaneou
 
 -   `collector.py`: Fetches 1-minute price data and saves it.
 -   `app.py`: Runs the Dash web server, calculates indicators, and generates trade signals.
--   `trade.py`: Executes trades based on the signals from `app.py`.
+-   `trade.py`: Executes trades
+-   `trade_bot.py`: Runs the trade bot that reads from the .json
 -   `example_utils.py`: A utility file for connecting to the Hyperliquid SDK.
 -   `price_data.json`: Stores the raw, 1-minute price data.
 -   `trade_signals.json`: Stores the latest calculated signal. This file is read by `trade.py`.
@@ -93,6 +94,6 @@ python app.py
 
 **Terminal 3: Start the Trading Bot**
 ```bash
-python trade.py
+python trade_bot.py
 ```
 *This bot will now monitor `trade_signals.json` and execute trades when a signal appears.*
