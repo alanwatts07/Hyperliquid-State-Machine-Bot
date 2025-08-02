@@ -3,6 +3,8 @@
 # This script runs in the background to fetch the price of a specified coin
 # every minute and save it to a JSON file.
 #
+# It includes exponential backoff to handle API rate limiting (429 errors) gracefully.
+#
 # To Run:
 # 1. Save this file as 'collector.py'.
 # 2. Run from your terminal: python collector.py
@@ -46,34 +48,51 @@ def collect_data():
 
     info = Info()
     price_history = load_data()
+    
+    # --- NEW: Variables for exponential backoff ---
+    backoff_time = FETCH_INTERVAL_SECONDS # Start with the default interval
 
     try:
         while True:
-            # Fetch the latest mid-price
-            all_mids = info.all_mids()
-            if COIN_TO_TRACK in all_mids:
-                price = float(all_mids[COIN_TO_TRACK])
-                timestamp = datetime.now().isoformat()
+            try:
+                # Fetch the latest mid-price
+                all_mids = info.all_mids()
+                
+                # --- NEW: Reset backoff time on a successful request ---
+                backoff_time = FETCH_INTERVAL_SECONDS
+                
+                if COIN_TO_TRACK in all_mids:
+                    price = float(all_mids[COIN_TO_TRACK])
+                    timestamp = datetime.now().isoformat()
 
-                # Create new data point
-                new_entry = {"timestamp": timestamp, "price": price}
-                price_history.append(new_entry)
+                    new_entry = {"timestamp": timestamp, "price": price}
+                    price_history.append(new_entry)
 
-                # Save the updated list back to the file
-                save_data(price_history)
+                    save_data(price_history)
 
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved: {COIN_TO_TRACK} @ ${price:.2f}")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved: {COIN_TO_TRACK} @ ${price:.2f}")
 
-            else:
-                print(f"[!] Error: Coin '{COIN_TO_TRACK}' not found.")
+                else:
+                    print(f"[!] Error: Coin '{COIN_TO_TRACK}' not found.")
 
-            # Wait for the specified interval
+            # --- NEW: Catch the specific rate limit error ---
+            except Exception as e:
+                # Check if the error is a rate limit error (HTTP 429)
+                if '429' in str(e):
+                    print(f"\n[!] Rate limit exceeded (429). Backing off for {backoff_time} seconds...")
+                    time.sleep(backoff_time)
+                    # Double the backoff time for the next potential failure
+                    backoff_time *= 2 
+                    continue # Skip the rest of the loop and try again
+                else:
+                    # Handle other errors
+                    print(f"\n[!] An unexpected error occurred: {e}")
+            
+            # Wait for the normal interval before the next fetch
             time.sleep(FETCH_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:
         print("\n[*] Data collection stopped.")
-    except Exception as e:
-        print(f"\n[!] An error occurred: {e}")
 
 if __name__ == "__main__":
     collect_data()
