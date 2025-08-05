@@ -20,7 +20,7 @@ from datetime import datetime
 SIGNAL_FILE = "trade_signals.json"
 TRADE_LOG_FILE = "trade_log.json" # <-- NEW: File to log all trades
 CHECK_INTERVAL_SECONDS = 5  # Check the signal file every 5 seconds
-TRADE_USD_SIZE = 25 # The size of the trade to place in USD
+TRADE_USD_SIZE = 225 # The size of the trade to place in USD after leverage so divide by 10
 
 def read_signal_file():
     """Reads the signal data from the JSON file."""

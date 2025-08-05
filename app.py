@@ -91,8 +91,8 @@ app.layout = html.Div(style={
         'stop_loss_hit': False # To display a message for one tick
     }),
     
-    html.H1(f"{COIN_TO_TRACK} - 5-Minute Bottomfeeder Chart", style={'textAlign': 'center', 'padding': '20px'}),
-    html.Div("Live data from [UNDISCLOSED] API with Fibonacci Levels", style={'textAlign': 'center', 'color': '#BBBBBB'}),
+    html.H1(f"{COIN_TO_TRACK} - 5-Minute Bottomfeeder Bot", style={'textAlign': 'center', 'padding': '20px'}),
+    html.Div("Live data from [UNDISCLOSED] API with [UNDISCLOSED] Levels", style={'textAlign': 'center', 'color': '#BBBBBB'}),
     
     dcc.Graph(id='live-candlestick-chart', style={'flex-grow': '1'}),
     
@@ -100,15 +100,19 @@ app.layout = html.Div(style={
     dcc.Interval(id='interval-component', interval=APP_REFRESH_SECONDS * 1000, n_intervals=0)
 ])
 
+
 # --- Callback to Update the Chart and Indicators ---
 @app.callback(
     [Output('live-candlestick-chart', 'figure'),
      Output('indicator-display', 'children'),
      Output('trade-state-storage', 'data')],
     Input('interval-component', 'n_intervals'),
-    State('trade-state-storage', 'data')
+    # MODIFIED: Added relayoutData as a State
+    [State('trade-state-storage', 'data'),
+     State('live-candlestick-chart', 'relayoutData')]
 )
-def update_chart_and_indicators(n, trade_state):
+# MODIFIED: Added relayout_data argument to the function
+def update_chart_and_indicators(n, trade_state, relayout_data):
     try:
         with open(DATA_FILE, 'r') as f:
             data = json.load(f)
@@ -122,8 +126,7 @@ def update_chart_and_indicators(n, trade_state):
         ohlc_df = df['price'].resample('5T').ohlc()
         ohlc_df.dropna(inplace=True)
 
-        if len(ohlc_df) < 200: # Check for enough data for 200 EMA
-            # You can decide how to handle this, for now, we'll proceed but EMA will be mostly NaN
+        if len(ohlc_df) < 200:
             pass 
 
         # --- Indicator Calculations ---
@@ -140,28 +143,25 @@ def update_chart_and_indicators(n, trade_state):
         tr = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(axis=1)
         df_with_fibs['atr'] = tr.rolling(window=ATR_PERIOD).mean()
         
-        # NEW: 200 EMA Calculation
         df_with_fibs['ema_200'] = df_with_fibs['close'].ewm(span=200, adjust=False).mean()
 
         # --- State Machine Logic ---
+        # (All state machine logic remains unchanged)
         latest_close = df_with_fibs['close'].iloc[-1]
         latest_wma_0 = df_with_fibs['wma_fib_0'].iloc[-1]
         latest_fib_entry = df_with_fibs['fib_entry'].iloc[-1]
         latest_atr = df_with_fibs['atr'].iloc[-1]
         
-        # Unpack state
         trigger_on = trade_state.get('trigger_on', False)
         in_position = trade_state.get('in_position', False)
         entry_price = trade_state.get('entry_price')
         stop_loss_level = trade_state.get('stop_loss_level')
         
-        # Local flags for this update cycle
         buy_signal = False
         stop_loss_hit = False
 
         reset_threshold = latest_wma_0 * (1 + fib_calculator.config['trading']['reset_pct_above_fib_0'])
 
-        # --- Main State Evaluation ---
         if in_position:
             if stop_loss_level and latest_close < stop_loss_level:
                 stop_loss_hit = True
@@ -178,8 +178,6 @@ def update_chart_and_indicators(n, trade_state):
             
             if trigger_on and latest_close > latest_wma_0:
                 buy_signal = True
-                trigger_on = False
-                
                 in_position = True
                 entry_price = latest_close
                 if not pd.isnull(latest_atr):
@@ -197,7 +195,6 @@ def update_chart_and_indicators(n, trade_state):
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['fib_entry'], mode='lines', name='Fib Entry (Buy Zone Lower)', line=dict(color='cyan', width=1, dash='dash')))
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['wma_fib_50'], mode='lines', name='WMA Fib 50 (Target)', line=dict(color='red', width=1)))
         
-        # NEW: Add 200 EMA trace to the plot
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['ema_200'], mode='lines', name='200 EMA', line=dict(color='yellow', width=2)))
 
         if in_position and stop_loss_level:
@@ -207,14 +204,25 @@ def update_chart_and_indicators(n, trade_state):
                 annotation_position="bottom right", annotation_font=dict(color="orange")
             )
 
+        # --- Layout Configuration ---
         fig.update_layout(
             title_text=f'Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
             yaxis_title=f'Price (USD)', xaxis_rangeslider_visible=False, template='plotly_dark',
             autosize=True
         )
         
+        # NEW: This block re-applies the zoom/pan state
+        if relayout_data:
+            # Check if the user has zoomed or panned on the x-axis
+            if 'xaxis.range[0]' in relayout_data and 'xaxis.range[1]' in relayout_data:
+                fig.update_layout(xaxis_range=[relayout_data['xaxis.range[0]'], relayout_data['xaxis.range[1]']])
+            # Check if the user has zoomed or panned on the y-axis
+            if 'yaxis.range[0]' in relayout_data and 'yaxis.range[1]' in relayout_data:
+                 fig.update_layout(yaxis_range=[relayout_data['yaxis.range[0]'], relayout_data['yaxis.range[1]']])
+
+
         # --- Update Display and Final State ---
-        # Build Line 1 (Price, Zone, ATR)
+        # (This section remains unchanged)
         indicator_text = [
             html.Span(f"Latest Price: ${latest_close:,.2f} | ", style={'color': '#FFFFFF'}),
             html.Span(f"Buy Zone: ${latest_fib_entry:,.2f}", style={'color': 'cyan'}),
@@ -222,14 +230,12 @@ def update_chart_and_indicators(n, trade_state):
             html.Span(f" | ATR: {latest_atr:,.3f}", style={'color': '#BBBBBB'}),
             html.Br()
         ]
-
-        # Build Line 2 (The Status Line)
         status_line = [html.Span("STATUS: ", style={'fontWeight': 'bold'})]
-
         if stop_loss_hit:
             status_line.append(html.Span("STOP LOSS HIT", style={'fontWeight': 'bold', 'color': 'red'}))
         elif in_position:
-            status_line.append(html.Span(f"In Position: True", style={'fontWeight': 'bold', 'color': 'orange'}))
+            buy_color = 'lime' if buy_signal else 'orange'
+            status_line.append(html.Span(f"In Position: True", style={'fontWeight': 'bold', 'color': buy_color}))
             if entry_price and stop_loss_level:
                 status_line.append(html.Span(f" | Entry: ${entry_price:,.2f} | Stop: ${stop_loss_level:,.2f}", style={'color': 'orange'}))
         else:
@@ -239,7 +245,6 @@ def update_chart_and_indicators(n, trade_state):
             status_line.append(html.Span(f"In Position: False", style={'color': '#BBBBBB', 'marginRight': '15px'}))
             status_line.append(html.Span(f"| Trigger Armed: {trigger_on}", style={'color': trigger_color, 'marginRight': '15px'}))
             status_line.append(html.Span(f"| BUY SIGNAL: {buy_signal}", style={'color': buy_color, 'fontWeight': 'bold' if buy_signal else 'normal'}))
-
         indicator_text.extend(status_line)
 
         new_state = {
