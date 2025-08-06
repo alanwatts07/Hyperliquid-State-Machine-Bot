@@ -18,9 +18,9 @@ from datetime import datetime
 
 # --- Configuration ---
 SIGNAL_FILE = "trade_signals.json"
-TRADE_LOG_FILE = "trade_log.json" # <-- NEW: File to log all trades
+TRADE_LOG_FILE = "trade_log.json" # Corrected filename
 CHECK_INTERVAL_SECONDS = 5  # Check the signal file every 5 seconds
-TRADE_USD_SIZE = 225 # The size of the trade to place in USD after leverage so divide by 10
+TRADE_USD_SIZE = 225 # The size of the trade to place in USD
 
 def read_signal_file():
     """Reads the signal data from the JSON file."""
@@ -42,12 +42,13 @@ def reset_signal_file(data):
         json.dump(data, f, indent=4)
     print("[*] Signal file has been reset.")
 
-# --- NEW: Function to log trade details ---
-def log_trade(signal_data, order_result, order_size):
+# --- MODIFIED: Function to log trade details with trade_type ---
+def log_trade(signal_data, order_result, order_size, trade_type):
     """Appends the details of a trade attempt to the trade log file."""
-    print("[*] Logging trade attempt...")
+    print(f"[*] Logging '{trade_type}' trade attempt...")
     log_entry = {
         "log_timestamp": datetime.now().isoformat(),
+        "trade_type": trade_type, # <-- NEW: Added trade type to the log
         "trade_size_usd": TRADE_USD_SIZE,
         "calculated_asset_size": order_size,
         "signal_data": signal_data,
@@ -70,8 +71,6 @@ def log_trade(signal_data, order_result, order_size):
     with open(TRADE_LOG_FILE, 'w') as f:
         json.dump(logs, f, indent=4)
     print("[*] Trade logged successfully.")
-# --- End of new section ---
-
 
 def main():
     """
@@ -91,13 +90,14 @@ def main():
             # 1. Read the signal file
             signal_data = read_signal_file()
 
-            if signal_data and signal_data['state']['buy_signal']:
-                print(f"\n[!] BUY SIGNAL DETECTED at {signal_data['timestamp']}")
-                print(f"    Price: ${signal_data['latest_price']:.2f}, Fib 0: ${signal_data['fib_0_level']:.2f}")
+            if signal_data and signal_data.get('state', {}).get('buy_signal'):
+                print(f"\n[!] BUY SIGNAL DETECTED at {signal_data.get('timestamp')}")
+                print(f"    Price: ${signal_data.get('latest_price', 0):.2f}, Fib 0: ${signal_data.get('fib_0_level', 0):.2f}")
 
                 # --- Execute The Trade ---
                 coin = signal_data['coin']
                 is_buy = True
+                trade_type = "buy" # Define the trade type
 
                 meta = info.meta()
                 sz_decimals = next((asset["szDecimals"] for asset in meta["universe"] if asset["name"] == coin), 2)
@@ -113,7 +113,8 @@ def main():
                 print(order_result)
                 
                 # 2. Log the trade attempt
-                log_trade(signal_data, order_result, order_size_in_asset)
+                # MODIFIED: Pass the trade_type to the log_trade function
+                log_trade(signal_data, order_result, order_size_in_asset, trade_type)
                 
                 # 3. Reset the signal file if the order was accepted by the exchange
                 if order_result.get("status") == "ok":
