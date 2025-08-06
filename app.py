@@ -190,19 +190,30 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         status_line = [html.Span("STATUS: ", style={'fontWeight': 'bold'})]
         
         if in_position:
+            # NEW: Calculate the total dollar value of the position
+            position_value_usd = position_size * latest_close
+            
             status_line.append(html.Span("In Position", style={'fontWeight': 'bold', 'color': 'orange'}))
-            status_line.append(html.Span(f" | Size: {position_size:.4f} {COIN_TO_TRACK}", style={'color': 'orange'}))
+            
+            # MODIFIED: Display both LTC size and its USD value
+            status_line.append(html.Span(f" | Size: {position_size:.4f} {COIN_TO_TRACK} (${position_value_usd:,.2f})", style={'color': 'orange'}))
+        
             if entry_price:
                 status_line.append(html.Span(f" | Entry: ${entry_price:,.2f}", style={'color': 'orange'}))
+                
+                # PnL calculations
                 pnl_pct = ((latest_close - entry_price) / entry_price) * 100
+                pnl_usd = (latest_close - entry_price) * position_size # NEW: Calculate PnL in dollars
+                
                 pnl_color = 'lime' if pnl_pct >= 0 else 'red'
                 pnl_sign = '+' if pnl_pct >= 0 else ''
-                status_line.append(html.Span(f" | PnL: {pnl_sign}{pnl_pct:.2f}%", style={'color': pnl_color, 'fontWeight': 'bold'}))
-            # Removed display of stop-loss level.
-        else:
-            status_line.append(html.Span(f"Trigger Armed: {trigger_on}", style={'color': 'lime' if trigger_on else '#BBBBBB', 'marginRight': '15px'}))
-            status_line.append(html.Span(f"| BUY SIGNAL: {buy_signal}", style={'color': 'lime' if buy_signal else '#BBBBBB', 'fontWeight': 'bold' if buy_signal else 'normal'}))
-        indicator_text.extend(status_line)
+                
+                # MODIFIED: Display PnL % and the new PnL dollar amount
+                status_line.append(html.Span(f" | PnL: {pnl_sign}{pnl_pct:.2f}% (${pnl_sign}{pnl_usd:,.2f})", style={'color': pnl_color, 'fontWeight': 'bold'}))
+            else:
+                status_line.append(html.Span(f"Trigger Armed: {trigger_on}", style={'color': 'lime' if trigger_on else '#BBBBBB', 'marginRight': '15px'}))
+                status_line.append(html.Span(f"| BUY SIGNAL: {buy_signal}", style={'color': 'lime' if buy_signal else '#BBBBBB', 'fontWeight': 'bold' if buy_signal else 'normal'}))
+            indicator_text.extend(status_line)
 
         # --- State Saving ---
         new_state = {'trigger_on': trigger_on, 'in_position': in_position, 'entry_price': entry_price, 'position_size': position_size}
