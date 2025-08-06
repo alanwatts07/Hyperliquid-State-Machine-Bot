@@ -107,11 +107,9 @@ app.layout = html.Div(style={
      Output('indicator-display', 'children'),
      Output('trade-state-storage', 'data')],
     Input('interval-component', 'n_intervals'),
-    # MODIFIED: Added relayoutData as a State
     [State('trade-state-storage', 'data'),
      State('live-candlestick-chart', 'relayoutData')]
 )
-# MODIFIED: Added relayout_data argument to the function
 def update_chart_and_indicators(n, trade_state, relayout_data):
     try:
         with open(DATA_FILE, 'r') as f:
@@ -146,12 +144,13 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         df_with_fibs['ema_200'] = df_with_fibs['close'].ewm(span=200, adjust=False).mean()
 
         # --- State Machine Logic ---
-        # (All state machine logic remains unchanged)
         latest_close = df_with_fibs['close'].iloc[-1]
         latest_wma_0 = df_with_fibs['wma_fib_0'].iloc[-1]
         latest_fib_entry = df_with_fibs['fib_entry'].iloc[-1]
         latest_atr = df_with_fibs['atr'].iloc[-1]
-        
+        # Get the latest WMA Fib 50 value
+        latest_wma_50 = df_with_fibs['wma_fib_50'].iloc[-1]
+
         trigger_on = trade_state.get('trigger_on', False)
         in_position = trade_state.get('in_position', False)
         entry_price = trade_state.get('entry_price')
@@ -194,7 +193,6 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['wma_fib_0'], mode='lines', name='WMA Fib 0 (Buy Zone Upper)', line=dict(color='lime', width=1)))
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['fib_entry'], mode='lines', name='Fib Entry (Buy Zone Lower)', line=dict(color='cyan', width=1, dash='dash')))
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['wma_fib_50'], mode='lines', name='WMA Fib 50 (Target)', line=dict(color='red', width=1)))
-        
         fig.add_trace(go.Scatter(x=df_with_fibs.index, y=df_with_fibs['ema_200'], mode='lines', name='200 EMA', line=dict(color='yellow', width=2)))
 
         if in_position and stop_loss_level:
@@ -211,18 +209,14 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
             autosize=True
         )
         
-        # NEW: This block re-applies the zoom/pan state
         if relayout_data:
-            # Check if the user has zoomed or panned on the x-axis
             if 'xaxis.range[0]' in relayout_data and 'xaxis.range[1]' in relayout_data:
                 fig.update_layout(xaxis_range=[relayout_data['xaxis.range[0]'], relayout_data['xaxis.range[1]']])
-            # Check if the user has zoomed or panned on the y-axis
             if 'yaxis.range[0]' in relayout_data and 'yaxis.range[1]' in relayout_data:
                  fig.update_layout(yaxis_range=[relayout_data['yaxis.range[0]'], relayout_data['yaxis.range[1]']])
 
 
         # --- Update Display and Final State ---
-        # (This section remains unchanged)
         indicator_text = [
             html.Span(f"Latest Price: ${latest_close:,.2f} | ", style={'color': '#FFFFFF'}),
             html.Span(f"Buy Zone: ${latest_fib_entry:,.2f}", style={'color': 'cyan'}),
@@ -255,11 +249,46 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
             'stop_loss_hit': stop_loss_hit
         }
         
+        #
+        # <<<<<<<<<<<< THIS IS THE FIX >>>>>>>>>>>>
+        # Create a dictionary with the desired structure for the JSON file.
+        #
+        signal_data = {
+            "timestamp": datetime.now().isoformat(),
+            "coin": COIN_TO_TRACK,
+            "latest_price": latest_close,
+            "fib_entry_level": latest_fib_entry,
+            "fib_0_level": latest_wma_0,
+            "fib_50_level": latest_wma_50,
+            "state": {
+                "trigger_on": trigger_on,
+                "buy_signal": buy_signal
+            }
+        }
+
+        # Write the structured dictionary to the signal file.
+        with open(SIGNAL_FILE, 'w') as f:
+            json.dump(signal_data, f, indent=4) # Using indent for readability
+
         return fig, indicator_text, new_state
 
     except (FileNotFoundError, json.JSONDecodeError, ValueError, IndexError) as e:
+        # Also update the error logging to be more structured.
+        error_data = {
+            "timestamp": datetime.now().isoformat(),
+            "coin": COIN_TO_TRACK,
+            "latest_price": None,
+            "error": str(e),
+            "state": {
+                "trigger_on": False,
+                "buy_signal": False
+            }
+        }
+        with open(SIGNAL_FILE, 'w') as f:
+            json.dump(error_data, f, indent=4)
+            
         fig = go.Figure().update_layout(title_text=f"Waiting for data... ({e})", template='plotly_dark', autosize=True)
         return fig, f"Error: {e}", {'trigger_on': False, 'in_position': False, 'entry_price': None, 'stop_loss_level': None, 'stop_loss_hit': False}
-
+        
 if __name__ == '__main__':
     app.run(debug=True)
