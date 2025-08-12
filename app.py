@@ -4,6 +4,9 @@
 # its initial position state by reading a trade log file on startup.
 # It now displays the PnL %, plots individual trades, shows the average entry price,
 # and passes the ATR value to the signal file.
+# Additionally creates price_savant.json with incremental updates to avoid
+# reprocessing enormous datasets.
+# Now also saves the most recent savant data to trigger.json
 # NOTE: This version has had the ATR-based stop-loss functionality removed.
 #
 # Prerequisites:
@@ -26,13 +29,17 @@ from datetime import datetime
 import numpy as np
 
 # --- Configuration ---
-DATA_FILE = "ltc_price_data.json"
+DATA_FILE = "price_data.json"
 SIGNAL_FILE = "trade_signals.json"
+PRICE_SAVANT_FILE = "price_savant.json"  # Enhanced price data file
+TRIGGER_FILE = "trigger.json"  # Most recent savant data
 LOG_FILE = "trade_log.json"
-COIN_TO_TRACK = "LTC"
+COIN_TO_TRACK = "SOL"
 APP_REFRESH_SECONDS = 5
 ATR_PERIOD = 14
-# ATR_MULTIPLIER has been removed as it was only for the stop-loss.
+
+# Global variable to track last processed record
+last_processed_count = 0
 
 # --- Helper function to read trade logs ---
 def read_trade_logs(log_file_path):
@@ -69,7 +76,6 @@ def get_initial_trade_state(log_file_path):
             return default_state
         else:
             total_size = sum(float(b.get('calculated_asset_size', 0)) for b in buys_in_cycle)
-            # For simplicity, using the first buy price as the entry for the cycle. A weighted average is also an option.
             first_buy_price = float(buys_in_cycle[0]['exchange_response']['response']['data']['statuses'][0]['filled']['avgPx'])
             print(f"✅ STATE RECOVERY: Found active position. Size: {total_size}, Entry: {first_buy_price}")
             return {'in_position': True, 'entry_price': first_buy_price, 'position_size': total_size}
@@ -93,10 +99,227 @@ class FibonacciCalculator:
         df_copy['wma_fib_50'] = (df_copy['highest_high'] - ((df_copy['highest_high'] - df_copy['lowest_low']) * 0.5)).rolling(window=24).mean()
         return df_copy
 
+# --- Function to get last processed count ---
+def get_last_processed_count():
+    """Get the number of records already processed in price_savant.json"""
+    try:
+        if not os.path.exists(PRICE_SAVANT_FILE):
+            return 0
+        with open(PRICE_SAVANT_FILE, 'r') as f:
+            existing_data = json.load(f)
+        return len(existing_data) if isinstance(existing_data, list) else 0
+    except:
+        return 0
+
+# --- Function to create enhanced record ---
+def create_enhanced_record(price_record, fib_data_map, trade_state, previous_trigger_state=None):
+    """Create a single enhanced price record with proper trigger logic"""
+    enhanced_record = price_record.copy()
+    
+    try:
+        # Parse the timestamp to find matching 5-minute window
+        record_time = pd.to_datetime(price_record['timestamp'])
+        window_time = record_time.floor('5T')
+        window_key = window_time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Add Fibonacci and technical data if available
+        if window_key in fib_data_map:
+            fib_data = fib_data_map[window_key]
+            enhanced_record.update({
+                'ohlc_open': fib_data['open'],
+                'ohlc_high': fib_data['high'],
+                'ohlc_low': fib_data['low'],
+                'ohlc_close': fib_data['close'],
+                'wma_fib_0': fib_data['wma_fib_0'],
+                'wma_fib_50': fib_data['wma_fib_50'],
+                'fib_entry': fib_data['fib_entry'],
+                'atr': fib_data['atr'],
+                'highest_high_42': fib_data['highest_high'],
+                'lowest_low_42': fib_data['lowest_low']
+            })
+            
+            # Calculate trigger states for this specific record
+            current_price = price_record['price']
+            wma_fib_0 = fib_data['wma_fib_0']
+            fib_entry = fib_data['fib_entry']
+            
+            if wma_fib_0 is not None and fib_entry is not None:
+                reset_threshold = wma_fib_0 * 1.005
+                
+                # Use previous trigger state or default to False
+                trigger_armed = previous_trigger_state if previous_trigger_state is not None else False
+                buy_signal = False
+                
+                # Update trigger state based on price action
+                if current_price > reset_threshold:
+                    trigger_armed = False
+                elif current_price < fib_entry:
+                    trigger_armed = True
+                
+                # Check for buy signal - trigger must be armed AND price above fib_0
+                if trigger_armed and current_price > wma_fib_0:
+                    buy_signal = True
+                
+                enhanced_record.update({
+                    'trigger_armed': trigger_armed,
+                    'buy_signal': buy_signal,
+                    'reset_threshold': reset_threshold,
+                    'price_above_reset': current_price > reset_threshold if reset_threshold else None,
+                    'price_below_entry': current_price < fib_entry if fib_entry else None,
+                    'price_above_fib_0': current_price > wma_fib_0 if wma_fib_0 else None,
+                    'in_buy_zone': (fib_entry <= current_price <= wma_fib_0) if (fib_entry and wma_fib_0) else None
+                })
+                
+                # Return the updated trigger state for the next record
+                return enhanced_record, trigger_armed
+            else:
+                enhanced_record.update({
+                    'trigger_armed': None, 'buy_signal': False, 'reset_threshold': None,
+                    'price_above_reset': None, 'price_below_entry': None, 'price_above_fib_0': None, 'in_buy_zone': None
+                })
+        else:
+            # No matching OHLC window found, add empty fib fields
+            enhanced_record.update({
+                'ohlc_open': None, 'ohlc_high': None, 'ohlc_low': None, 'ohlc_close': None,
+                'wma_fib_0': None, 'wma_fib_50': None, 'fib_entry': None, 'atr': None,
+                'highest_high_42': None, 'lowest_low_42': None,
+                'trigger_armed': None, 'buy_signal': False, 'reset_threshold': None,
+                'price_above_reset': None, 'price_below_entry': None, 'price_above_fib_0': None, 'in_buy_zone': None
+            })
+        
+        # Add current trading state
+        enhanced_record.update({
+            'current_in_position': trade_state.get('in_position', False),
+            'current_trigger_on': trade_state.get('trigger_on', False),
+            'entry_price': trade_state.get('entry_price'),
+            'position_size': trade_state.get('position_size', 0.0)
+        })
+        
+    except Exception as e:
+        print(f"❌ Error processing record: {e}")
+        # Add empty fields if there's an error
+        enhanced_record.update({
+            'ohlc_open': None, 'ohlc_high': None, 'ohlc_low': None, 'ohlc_close': None,
+            'wma_fib_0': None, 'wma_fib_50': None, 'fib_entry': None, 'atr': None,
+            'highest_high_42': None, 'lowest_low_42': None,
+            'trigger_armed': None, 'buy_signal': False, 'reset_threshold': None,
+            'price_above_reset': None, 'price_below_entry': None, 'price_above_fib_0': None, 'in_buy_zone': None,
+            'current_in_position': trade_state.get('in_position', False),
+            'current_trigger_on': trade_state.get('trigger_on', False),
+            'entry_price': trade_state.get('entry_price'), 'position_size': trade_state.get('position_size', 0.0)
+        })
+    
+    return enhanced_record, previous_trigger_state
+
+# --- Function to save most recent trigger data ---
+def save_latest_trigger_data(enhanced_records):
+    """Save the most recent enhanced record to trigger.json"""
+    try:
+        if not enhanced_records:
+            return
+        
+        # Get the most recent record
+        latest_record = enhanced_records[-1]
+        
+        # Save to trigger.json
+        with open(TRIGGER_FILE, 'w') as f:
+            json.dump(latest_record, f, indent=2)
+        
+        print(f"📍 Updated {TRIGGER_FILE} with latest trigger data from {latest_record.get('timestamp')}")
+        
+    except Exception as e:
+        print(f"❌ Error saving trigger data: {e}")
+
+# --- Incremental price savant update function ---
+def update_price_savant_incremental(original_data, df_with_fibs, trade_state):
+    """Update price_savant.json incrementally - only process new records"""
+    global last_processed_count
+    
+    try:
+        current_count = len(original_data)
+        
+        # Check if we need to process anything
+        if current_count <= last_processed_count:
+            print(f"📊 No new records to process. Current: {current_count}, Last processed: {last_processed_count}")
+            return
+        
+        # Create fib data mapping
+        fib_data_map = {}
+        for timestamp, row in df_with_fibs.iterrows():
+            window_start = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            fib_data_map[window_start] = {
+                'open': float(row['open']) if not pd.isna(row['open']) else None,
+                'high': float(row['high']) if not pd.isna(row['high']) else None,
+                'low': float(row['low']) if not pd.isna(row['low']) else None,
+                'close': float(row['close']) if not pd.isna(row['close']) else None,
+                'wma_fib_0': float(row['wma_fib_0']) if not pd.isna(row['wma_fib_0']) else None,
+                'wma_fib_50': float(row['wma_fib_50']) if not pd.isna(row['wma_fib_50']) else None,
+                'fib_entry': float(row['fib_entry']) if not pd.isna(row['fib_entry']) else None,
+                'atr': float(row['atr']) if not pd.isna(row['atr']) else None,
+                'highest_high': float(row['highest_high']) if not pd.isna(row['highest_high']) else None,
+                'lowest_low': float(row['lowest_low']) if not pd.isna(row['lowest_low']) else None
+            }
+        
+        # Load existing data or create empty list
+        if os.path.exists(PRICE_SAVANT_FILE) and last_processed_count > 0:
+            with open(PRICE_SAVANT_FILE, 'r') as f:
+                existing_data = json.load(f)
+            # Get the last trigger state to maintain continuity
+            last_trigger_state = None
+            if existing_data:
+                last_record = existing_data[-1]
+                last_trigger_state = last_record.get('trigger_armed')
+        else:
+            existing_data = []
+            last_processed_count = 0
+            last_trigger_state = False  # Default starting state
+            print("🆕 Creating price_savant.json from scratch...")
+        
+        # Process only new records
+        new_records = original_data[last_processed_count:]
+        print(f"🔄 Processing {len(new_records)} new records (from {last_processed_count} to {current_count})")
+        
+        # Process new records sequentially to maintain trigger state
+        current_trigger_state = last_trigger_state
+        new_enhanced_records = []
+        
+        for i, record in enumerate(new_records):
+            enhanced_record, current_trigger_state = create_enhanced_record(record, fib_data_map, trade_state, current_trigger_state)
+            existing_data.append(enhanced_record)
+            new_enhanced_records.append(enhanced_record)
+            
+            # Debug output for buy signals
+            if enhanced_record.get('buy_signal'):
+                print(f"🚀 BUY SIGNAL DETECTED at {record.get('timestamp')} - Price: {record.get('price')}")
+            
+            if (i + 1) % 1000 == 0:
+                print(f"📝 Processed {i + 1}/{len(new_records)} records")
+        
+        # Save updated data
+        with open(PRICE_SAVANT_FILE, 'w') as f:
+            json.dump(existing_data, f, indent=2)
+        
+        # NEW: Save the most recent record to trigger.json
+        save_latest_trigger_data(existing_data)
+        
+        # Update our tracking counter
+        last_processed_count = current_count
+        
+        # Count total buy signals for debugging
+        total_buy_signals = sum(1 for record in existing_data if record.get('buy_signal', False))
+        print(f"✅ Updated {PRICE_SAVANT_FILE} - Total records: {len(existing_data)}, New records added: {len(new_records)}, Total buy signals: {total_buy_signals}")
+        
+    except Exception as e:
+        print(f"❌ Error in incremental update: {e}")
+
 # --- Dash App Initialization ---
 app = dash.Dash(__name__)
 app.title = f"{COIN_TO_TRACK} Price Dashboard"
 initial_state = get_initial_trade_state(LOG_FILE)
+
+# Initialize last processed count
+last_processed_count = get_last_processed_count()
+print(f"🚀 Starting with {last_processed_count} already processed records")
 
 # --- App Layout ---
 app.layout = html.Div(style={'backgroundColor': '#111111', 'color': '#FFFFFF', 'fontFamily': 'sans-serif', 'height': '100vh', 'display': 'flex', 'flexDirection': 'column'}, children=[
@@ -115,8 +338,10 @@ app.layout = html.Div(style={'backgroundColor': '#111111', 'color': '#FFFFFF', '
 )
 def update_chart_and_indicators(n, trade_state, relayout_data):
     try:
-        with open(DATA_FILE, 'r') as f: data = json.load(f)
-        if not data: raise ValueError("No data in file")
+        with open(DATA_FILE, 'r') as f: 
+            data = json.load(f)
+        if not data: 
+            raise ValueError("No data in file")
 
         df = pd.DataFrame(data)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -128,7 +353,7 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         df_with_fibs = fib_calculator.calculate_fib_levels(ohlc_df)
         df_with_fibs['fib_entry'] = df_with_fibs['wma_fib_0'] * (1 - fib_calculator.config['trading']['fib_entry_offset_pct'])
         
-        # ATR calculation is kept as it's passed to the signal file, but not used for a stop-loss here.
+        # ATR calculation
         high_low = df_with_fibs['high'] - df_with_fibs['low']
         high_prev_close = np.abs(df_with_fibs['high'] - df_with_fibs['close'].shift())
         low_prev_close = np.abs(df_with_fibs['low'] - df_with_fibs['close'].shift())
@@ -141,20 +366,20 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         buy_signal = False
         reset_threshold = latest_wma_0 * (1 + fib_calculator.config['trading']['reset_pct_above_fib_0'])
 
-        # --- Simplified Trading Logic (No Stop-Loss) ---
+        # --- Trading Logic ---
         if not in_position:
-            # Logic to arm or disarm the buy trigger
             if latest_close > reset_threshold:
                 trigger_on = False
+                print(f"🔴 Trigger DISARMED - Price {latest_close:.2f} above reset threshold {reset_threshold:.2f}")
             elif latest_close < latest_fib_entry:
                 trigger_on = True
+                print(f"🟡 Trigger ARMED - Price {latest_close:.2f} below entry level {latest_fib_entry:.2f}")
             
-            # Check for a buy signal if the trigger is armed
             if trigger_on and latest_close > latest_wma_0:
                 buy_signal = True
                 in_position = True
                 entry_price = latest_close
-                # Note: No stop-loss is set upon entry.
+                print(f"🟢 BUY SIGNAL FIRED - Price {latest_close:.2f} above fib_0 {latest_wma_0:.2f} with trigger armed")
 
         # --- Charting Logic ---
         fig = go.Figure(data=[go.Candlestick(x=df_with_fibs.index, open=df_with_fibs['open'], high=df_with_fibs['high'], low=df_with_fibs['low'], close=df_with_fibs['close'], name='Candles')])
@@ -179,46 +404,38 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
             if entry_price:
                 fig.add_hline(y=entry_price, line_dash="dash", line_color="purple", annotation_text=f"Avg Entry {entry_price:.2f}", annotation_position="bottom left", annotation_font=dict(color="purple"))
         
-        # Removed the plotting for the stop-loss level.
-        
         fig.update_layout(title_text=f'Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', yaxis_title='Price (USD)', xaxis_rangeslider_visible=False, template='plotly_dark')
-        if relayout_data and 'xaxis.range[0]' in relayout_data: fig.update_layout(xaxis_range=[relayout_data['xaxis.range[0]'], relayout_data['xaxis.range[1]']])
-        if relayout_data and 'yaxis.range[0]' in relayout_data: fig.update_layout(yaxis_range=[relayout_data['yaxis.range[0]'], relayout_data['yaxis.range[1]']])
+        if relayout_data and 'xaxis.range[0]' in relayout_data: 
+            fig.update_layout(xaxis_range=[relayout_data['xaxis.range[0]'], relayout_data['xaxis.range[1]']])
+        if relayout_data and 'yaxis.range[0]' in relayout_data: 
+            fig.update_layout(yaxis_range=[relayout_data['yaxis.range[0]'], relayout_data['yaxis.range[1]']])
 
         # --- Display Logic ---
         indicator_text = [html.Span(f"Latest Price: ${latest_close:,.2f} | Buy Zone: "), html.Span(f"${latest_fib_entry:,.2f}", style={'color': 'cyan'}), html.Span(f" - ${latest_wma_0:,.2f}", style={'color': 'lime'}), html.Br()]
         status_line = [html.Span("STATUS: ", style={'fontWeight': 'bold'})]
         
         if in_position:
-            # NEW: Calculate the total dollar value of the position
             position_value_usd = position_size * latest_close
-            
             status_line.append(html.Span("In Position", style={'fontWeight': 'bold', 'color': 'orange'}))
-            
-            # MODIFIED: Display both LTC size and its USD value
             status_line.append(html.Span(f" | Size: {position_size:.4f} {COIN_TO_TRACK} (${position_value_usd:,.2f})", style={'color': 'orange'}))
         
             if entry_price:
                 status_line.append(html.Span(f" | Entry: ${entry_price:,.2f}", style={'color': 'orange'}))
-                
-                # PnL calculations
                 pnl_pct = ((latest_close - entry_price) / entry_price) * 100
-                pnl_usd = (latest_close - entry_price) * position_size # NEW: Calculate PnL in dollars
-                
+                pnl_usd = (latest_close - entry_price) * position_size
                 pnl_color = 'lime' if pnl_pct >= 0 else 'red'
                 pnl_sign = '+' if pnl_pct >= 0 else ''
-                
-                # MODIFIED: Display PnL % and the new PnL dollar amount
                 status_line.append(html.Span(f" | PnL: {pnl_sign}{pnl_pct:.2f}% (${pnl_sign}{pnl_usd:,.2f})", style={'color': pnl_color, 'fontWeight': 'bold'}))
-            else:
-                status_line.append(html.Span(f"Trigger Armed: {trigger_on}", style={'color': 'lime' if trigger_on else '#BBBBBB', 'marginRight': '15px'}))
-                status_line.append(html.Span(f"| BUY SIGNAL: {buy_signal}", style={'color': 'lime' if buy_signal else '#BBBBBB', 'fontWeight': 'bold' if buy_signal else 'normal'}))
-            indicator_text.extend(status_line)
+        else:
+            status_line.append(html.Span(f"Trigger Armed: {trigger_on}", style={'color': 'lime' if trigger_on else '#BBBBBB', 'marginRight': '15px'}))
+            status_line.append(html.Span(f"| BUY SIGNAL: {buy_signal}", style={'color': 'lime' if buy_signal else '#BBBBBB', 'fontWeight': 'bold' if buy_signal else 'normal'}))
+        
+        indicator_text.extend(status_line)
 
         # --- State Saving ---
         new_state = {'trigger_on': trigger_on, 'in_position': in_position, 'entry_price': entry_price, 'position_size': position_size}
         
-        # --- MODIFIED: Added 'atr' to the signal data ---
+        # --- Save original signal data ---
         signal_data = {
             "timestamp": datetime.now().isoformat(),
             "coin": COIN_TO_TRACK,
@@ -226,18 +443,25 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
             "fib_entry_level": latest_fib_entry,
             "fib_0_level": latest_wma_0,
             "fib_50_level": latest_wma_50,
-            "atr": latest_atr, # <-- ATR is still included for external use
+            "atr": latest_atr,
             "state": {
                 "trigger_on": trigger_on,
                 "buy_signal": buy_signal
             }
         }
-        with open(SIGNAL_FILE, 'w') as f: json.dump(signal_data, f, indent=4)
+        with open(SIGNAL_FILE, 'w') as f: 
+            json.dump(signal_data, f, indent=4)
+        
+        # --- Incremental update to price_savant.json ---
+        update_price_savant_incremental(data, df_with_fibs, new_state)
+        
         return fig, indicator_text, new_state
 
     except (FileNotFoundError, json.JSONDecodeError, ValueError, IndexError) as e:
         error_data = {"timestamp": datetime.now().isoformat(), "coin": COIN_TO_TRACK, "error": str(e), "state": {"trigger_on": False, "buy_signal": False}}
-        with open(SIGNAL_FILE, 'w') as f: json.dump(error_data, f, indent=4)
+        with open(SIGNAL_FILE, 'w') as f: 
+            json.dump(error_data, f, indent=4)
+        
         fig = go.Figure().update_layout(title_text=f"Waiting for data... ({e})", template='plotly_dark')
         return fig, f"Error: {e}", trade_state
 
