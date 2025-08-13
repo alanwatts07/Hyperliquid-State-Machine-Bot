@@ -8,7 +8,7 @@ venv/
 # Data & Logs - IMPORTANT!
 *.json
 *.log
-
+*.old
 # IDE / OS specific
 .vscode/
 .idea/
