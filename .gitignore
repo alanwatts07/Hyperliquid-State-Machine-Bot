@@ -9,6 +9,7 @@ venv/
 *.json
 *.log
 *.old
+*.db
 # IDE / OS specific
 .vscode/
 .idea/
