@@ -24,6 +24,7 @@ The system is composed of three core Python scripts that must be run simultaneou
 -   `price_data.json`: Stores the raw, 1-minute price data.
 -   `trade_signals.json`: Stores the latest calculated signal. This file is read by `trade.py`.
 -   `trade_log.json`: A log of all trade attempts made by `trade.py`.
+-   `main.py`: Will launch all processes in tmux detached terminals in the correct order.
 
 ***
 
@@ -72,28 +73,56 @@ pip install -r requirements.txt
 
 ### 5. Configuration
 -   **`collector.py` & `app.py`**: Open these files and ensure the `COIN_TO_TRACK` variable is set to the desired asset (e.g., "SOL").
--   **`trade.py`**: Open this file and set the `TRADE_USD_SIZE` variable to your desired trade amount in USD.
+-   **`trade_bot.py`**: Open this file and set the `TRADE_USD_SIZE` variable to your desired trade amount in USD.
 
 ***
 
-## How to Run the Bot
+# 🚀 System Startup & Management
 
-You must run the three main scripts in the correct order from three separate terminals. Make sure your virtual environment is activated in each terminal.
+This trading bot system is composed of four distinct processes that must run simultaneously. To simplify management, a `main.py` script is provided to launch, monitor, and manage all components within separate `tmux` sessions.
 
-**Terminal 1: Start the Data Collector**
-```bash
-python collector.py
-```
-*Leave this running. It will start creating `price_data.json`.*
+### Starting the System
 
-**Terminal 2: Start the Dash App**
-```bash
-python app.py
-```
-*This will start the web server. You can view the dashboard at http://127.0.0.1:8050/. Once it has enough data, it will create `trade_signals.json`.*
+The `main.py` script is the primary entry point for running the entire bot system. It will automatically check for running processes and only start the components that are not currently active.
 
-**Terminal 3: Start the Trading Bot**
-```bash
-python trade_bot.py
-```
-*This bot will now monitor `trade_signals.json` and execute trades when a signal appears.*
+1.  Navigate to the project directory in your terminal.
+2.  Run the manager script:
+    ```bash
+    python3 main.py
+    ```
+3.  The manager will launch all four scripts (`collector.py`, `app.py`, `trade_bot.py`, and `discord_bot.py`) in their own detached `tmux` sessions and begin monitoring them.
+
+---
+### Monitoring Processes
+
+Once the system is running, you can "attach" to any of the `tmux` sessions to view the live log output for that specific script. This is essential for debugging and monitoring.
+
+* **List all running sessions:**
+    ```bash
+    tmux list-sessions
+    ```
+* **View the output of a specific process:**
+    ```bash
+    # To view the price data collector
+    tmux attach -t collector
+
+    # To view the signal generator (app.py)
+    tmux attach -t dashboard
+
+    # To view the trading bot's actions
+    tmux attach -t tradebot
+
+    # To view the Discord bot's activity
+    tmux attach -t discordbot
+    ```
+* **To detach from a session** without stopping it, press `Ctrl+B` then `D`.
+
+---
+### Stopping the System
+
+The manager provides a simple command to shut down all related `tmux` sessions cleanly.
+
+* To stop all four processes, run:
+    ```bash
+    python3 main.py stop
+    ```
