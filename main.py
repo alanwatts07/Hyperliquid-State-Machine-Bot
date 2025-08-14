@@ -1,11 +1,13 @@
-# main.py - Tmux Process Manager for Trading Bot System
+# main.py - Tmux Process Manager for Trading Bot System (Safe Startup Edition)
 #
-# This script manages the startup and monitoring of:
-# 1. collector.py (price data collection) - in tmux session "collector"
-# 2. app.py (dashboard and signal generation) - in tmux session "dashboard"
-# 3. trade_bot.py (trade execution with alerts) - in tmux session "tradebot"
+# This script manages the startup and monitoring of the full 4-part system.
+# NEW: It now checks if a process is already running and will NOT restart it.
+#      It only starts processes that are not currently active.
 #
-# Usage: python main.py
+# 1. collector.py (price data collection)
+# 2. app.py (dashboard and signal generation)
+# 3. trade_bot.py (trade execution & risk management)
+# 4. discord_bot.py (Discord alerts & commands)
 
 import subprocess
 import time
@@ -16,8 +18,9 @@ from datetime import datetime
 
 # --- Configuration ---
 COLLECTOR_SCRIPT = "collector.py"
-DASHBOARD_SCRIPT = "app.py" 
+DASHBOARD_SCRIPT = "app.py"
 TRADE_BOT_SCRIPT = "trade_bot.py"
+DISCORD_BOT_SCRIPT = "discord_bot.py"
 
 CHECK_INTERVAL = 10  # Check process health every 10 seconds
 STARTUP_DELAY = 5    # Wait 5 seconds between starting each process
@@ -25,8 +28,9 @@ STARTUP_DELAY = 5    # Wait 5 seconds between starting each process
 # Tmux session names
 TMUX_SESSIONS = {
     "Collector": "collector",
-    "Dashboard": "dashboard", 
-    "Trade Bot": "tradebot"
+    "Dashboard": "dashboard",
+    "Trade Bot": "tradebot",
+    "Discord Bot": "discordbot"
 }
 
 class TmuxProcessManager:
@@ -46,35 +50,21 @@ class TmuxProcessManager:
             if result.returncode == 0:
                 self.log(f"✅ Tmux found: {result.stdout.strip()}")
                 return True
-            else:
-                self.log("❌ Tmux not found!")
-                return False
+            return False
         except FileNotFoundError:
-            self.log("❌ Tmux not installed! Please install tmux:")
-            self.log("   Ubuntu/Debian: sudo apt install tmux")
-            self.log("   macOS: brew install tmux")
-            self.log("   Or run without tmux using the basic version")
+            self.log("❌ Tmux not installed! Please install tmux to use this manager.")
             return False
             
     def tmux_session_exists(self, session_name):
         """Check if a tmux session exists"""
-        try:
-            result = subprocess.run(['tmux', 'has-session', '-t', session_name], 
-                                   capture_output=True)
-            return result.returncode == 0
-        except:
-            return False
+        result = subprocess.run(['tmux', 'has-session', '-t', session_name], capture_output=True)
+        return result.returncode == 0
             
     def kill_tmux_session(self, session_name):
         """Kill a tmux session if it exists"""
         if self.tmux_session_exists(session_name):
-            try:
-                subprocess.run(['tmux', 'kill-session', '-t', session_name], 
-                              capture_output=True)
-                self.log(f"🗑️  Killed existing tmux session: {session_name}")
-                return True
-            except:
-                return False
+            subprocess.run(['tmux', 'kill-session', '-t', session_name], capture_output=True)
+            self.log(f"🗑️  Killed tmux session: {session_name}")
         return True
         
     def start_tmux_process(self, script_name, process_name, session_name):
@@ -84,22 +74,14 @@ class TmuxProcessManager:
                 self.log(f"❌ ERROR: {script_name} not found!")
                 return False
                 
-            # Kill existing session if it exists
-            self.kill_tmux_session(session_name)
-            
             self.log(f"🚀 Starting {process_name} in tmux session '{session_name}'...")
             
-            # Create new tmux session and run the script
-            cmd = [
-                'tmux', 'new-session', '-d', '-s', session_name,
-                sys.executable, script_name
-            ]
-            
+            cmd = ['tmux', 'new-session', '-d', '-s', session_name, sys.executable, script_name]
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.returncode == 0:
                 self.sessions[process_name] = session_name
-                self.log(f"✅ {process_name} started in tmux session '{session_name}'")
+                self.log(f"✅ {process_name} started successfully")
                 self.log(f"   💡 To view: tmux attach -t {session_name}")
                 return True
             else:
@@ -110,59 +92,42 @@ class TmuxProcessManager:
             self.log(f"❌ ERROR starting {process_name}: {e}")
             return False
             
-    def is_tmux_session_running(self, session_name):
-        """Check if a tmux session is still running"""
-        return self.tmux_session_exists(session_name)
-        
-    def is_process_running(self, process_name):
-        """Check if a process is still running in its tmux session"""
-        if process_name not in self.sessions:
-            return False
-            
-        session_name = self.sessions[process_name]
-        if self.is_tmux_session_running(session_name):
-            return True
-        else:
-            self.log(f"❌ {process_name} tmux session '{session_name}' has stopped")
-            return False
-            
-    def stop_process(self, process_name):
-        """Stop a process by killing its tmux session"""
-        if process_name not in self.sessions:
-            return
-            
-        session_name = self.sessions[process_name]
-        if self.kill_tmux_session(session_name):
-            self.log(f"🛑 Stopped {process_name} (session: {session_name})")
-        
-        del self.sessions[process_name]
-        
     def stop_all_processes(self):
-        """Stop all managed processes"""
-        self.log("🛑 Stopping all tmux sessions...")
-        for process_name in list(self.sessions.keys()):
-            self.stop_process(process_name)
-            
+        """Stop all managed processes by killing their tmux sessions"""
+        self.log("🛑 Stopping all managed tmux sessions...")
+        for process_name, session_name in TMUX_SESSIONS.items():
+            self.kill_tmux_session(session_name)
+            self.log(f"   - Stopped {process_name} (session: {session_name})")
+        self.sessions.clear()
+
+    # <-- MODIFIED: This function now checks before starting
     def start_all_processes(self):
-        """Start all processes in correct order"""
-        self.log("🚀 Starting Trading Bot System in Tmux...")
+        """Start all processes in correct order, skipping any that are already running."""
+        self.log("🚀 Verifying Trading Bot System in Tmux...")
         self.log("=" * 60)
         
         processes = [
             (COLLECTOR_SCRIPT, "Collector", TMUX_SESSIONS["Collector"]),
             (DASHBOARD_SCRIPT, "Dashboard", TMUX_SESSIONS["Dashboard"]),
-            (TRADE_BOT_SCRIPT, "Trade Bot", TMUX_SESSIONS["Trade Bot"])
+            (TRADE_BOT_SCRIPT, "Trade Bot", TMUX_SESSIONS["Trade Bot"]),
+            (DISCORD_BOT_SCRIPT, "Discord Bot", TMUX_SESSIONS["Discord Bot"])
         ]
         
         for script, process_name, session_name in processes:
-            if self.start_tmux_process(script, process_name, session_name):
-                self.log(f"⏳ Waiting {STARTUP_DELAY} seconds for {process_name} to initialize...")
-                time.sleep(STARTUP_DELAY)
+            # First, check if the session already exists
+            if self.tmux_session_exists(session_name):
+                self.log(f"👍 {process_name} is already running in session '{session_name}'. Skipping.")
+                self.sessions[process_name] = session_name # Add to monitor list
             else:
-                self.log(f"❌ Failed to start {process_name}. Aborting startup.")
-                return False
+                # If it doesn't exist, start it
+                if self.start_tmux_process(script, process_name, session_name):
+                    self.log(f"⏳ Waiting {STARTUP_DELAY} seconds for {process_name} to initialize...")
+                    time.sleep(STARTUP_DELAY)
+                else:
+                    self.log(f"❌ Failed to start {process_name}. Aborting system check.")
+                    return False
                 
-        self.log("🎉 All processes started successfully in tmux!")
+        self.log("🎉 All required processes are running successfully!")
         self.log("=" * 60)
         return True
         
@@ -172,20 +137,17 @@ class TmuxProcessManager:
         
         while self.running:
             try:
-                # Check each process
-                for process_name in ["Collector", "Dashboard", "Trade Bot"]:
-                    if not self.is_process_running(process_name):
+                for process_name, script, session in [("Collector", COLLECTOR_SCRIPT, TMUX_SESSIONS["Collector"]),
+                                                      ("Dashboard", DASHBOARD_SCRIPT, TMUX_SESSIONS["Dashboard"]),
+                                                      ("Trade Bot", TRADE_BOT_SCRIPT, TMUX_SESSIONS["Trade Bot"]), 
+                                                      ("Discord Bot", DISCORD_BOT_SCRIPT, TMUX_SESSIONS["Discord Bot"])]:
+                    if session not in self.sessions.values():
+                         self.sessions[process_name] = session
+
+                    if not self.tmux_session_exists(session):
                         self.log(f"⚠️  {process_name} is not running! Attempting restart...")
-                        
-                        # Restart based on process type
-                        if process_name == "Collector":
-                            self.start_tmux_process(COLLECTOR_SCRIPT, "Collector", TMUX_SESSIONS["Collector"])
-                        elif process_name == "Dashboard":
-                            self.start_tmux_process(DASHBOARD_SCRIPT, "Dashboard", TMUX_SESSIONS["Dashboard"])
-                        elif process_name == "Trade Bot":
-                            self.start_tmux_process(TRADE_BOT_SCRIPT, "Trade Bot", TMUX_SESSIONS["Trade Bot"])
+                        self.start_tmux_process(script, process_name, session)
                 
-                # Wait before next check
                 time.sleep(CHECK_INTERVAL)
                 
             except KeyboardInterrupt:
@@ -203,93 +165,70 @@ class TmuxProcessManager:
     def show_status(self):
         """Show current system status"""
         self.log("\n📊 SYSTEM STATUS:")
-        self.log("-" * 50)
+        self.log("-" * 60)
         
         processes = [
-            ("Collector", COLLECTOR_SCRIPT, "🔄 Collecting price data"),
-            ("Dashboard", DASHBOARD_SCRIPT, "📊 Dashboard & signals"), 
-            ("Trade Bot", TRADE_BOT_SCRIPT, "🤖 Trade execution & alerts")
+            ("Collector", "🔄 Collecting price data"),
+            ("Dashboard", "📈 Generating signals (app.py)"),
+            ("Trade Bot", "🤖 Trade execution & risk management"),
+            ("Discord Bot", "💬 Discord alerts & commands")
         ]
         
-        for process_name, script, description in processes:
-            if self.is_process_running(process_name):
-                session_name = self.sessions[process_name]
-                self.log(f"✅ {process_name:<12} (tmux: {session_name:<10}) - {description}")
+        for process_name, description in processes:
+            session_name = TMUX_SESSIONS[process_name]
+            if self.tmux_session_exists(session_name):
+                self.log(f"✅ {process_name:<12} (tmux: {session_name:<12}) - {description}")
+                self.sessions[process_name] = session_name # Ensure it's in our list
             else:
                 self.log(f"❌ {process_name:<12} (STOPPED) - {description}")
                 
-        self.log("-" * 50)
-        self.log("🎯 System is running in tmux! Press Ctrl+C to stop all processes.")
+        self.log("-" * 60)
+        self.log("🎯 System is running! Press Ctrl+C to stop this manager (won't stop tmux sessions).")
+        self.log("💡 To stop everything, run `python3 main.py stop`")
         self.log(f"👀 Monitoring health every {CHECK_INTERVAL} seconds...")
         self.log("")
         
-        # Show tmux commands
         self.log("💡 TMUX COMMANDS:")
-        self.log("   tmux list-sessions          - List all sessions")
-        self.log("   tmux attach -t collector     - View collector output")  
-        self.log("   tmux attach -t dashboard     - View dashboard output")
-        self.log("   tmux attach -t tradebot      - View trade bot output")
-        self.log("   Ctrl+B then D               - Detach from tmux session")
+        self.log("   tmux list-sessions")
+        for process_name, session_name in TMUX_SESSIONS.items():
+            self.log(f"   tmux attach -t {session_name:<12} - View {process_name} output")
+        self.log("   Ctrl+B then D                  - Detach from a tmux session")
         self.log("")
         
     def run(self):
         """Main run function"""
-        # Set up signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
         try:
-            # Check tmux
-            if not self.check_tmux_installed():
-                return
-                
-            # Start all processes
-            if not self.start_all_processes():
-                self.log("❌ Failed to start system. Exiting.")
-                return
-                
-            # Show status
+            if not self.check_tmux_installed(): return
+            if not self.start_all_processes(): return
             self.show_status()
-            
-            # Monitor processes
             self.monitor_processes()
-            
         except Exception as e:
-            self.log(f"❌ Critical error: {e}")
+            self.log(f"❌ Critical error in run loop: {e}")
         finally:
-            # Clean shutdown
-            self.stop_all_processes()
-            self.log("👋 Trading Bot System shutdown complete.")
+            self.log("👋 Manager stopped. Tmux sessions are still running in the background.")
 
 def main():
-    """Main entry point"""
+    """Main entry point with command-line arguments for start/stop"""
     print("🤖 Trading Bot System Manager (Tmux Edition)")
     print("=" * 60)
-    
-    # Check if we're in a virtual environment
-    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
-        print("✅ Virtual environment detected")
-    else:
-        print("⚠️  Warning: No virtual environment detected")
-        response = input("Continue anyway? (y/N): ")
-        if response.lower() != 'y':
-            print("👋 Exiting. Activate your virtual environment and try again.")
-            return
-    
-    # Check if all script files exist
-    scripts = [COLLECTOR_SCRIPT, DASHBOARD_SCRIPT, TRADE_BOT_SCRIPT]
-    missing_scripts = [script for script in scripts if not os.path.exists(script)]
-    
-    if missing_scripts:
-        print(f"❌ Missing script files: {', '.join(missing_scripts)}")
-        print("   Make sure all scripts are in the current directory.")
+
+    manager = TmuxProcessManager()
+
+    if len(sys.argv) > 1 and sys.argv[1] == 'stop':
+        manager.stop_all_processes()
+        print("👋 System shutdown complete.")
+        return
+
+    # Check if all script files exist before starting
+    scripts = [COLLECTOR_SCRIPT, DASHBOARD_SCRIPT, TRADE_BOT_SCRIPT, DISCORD_BOT_SCRIPT]
+    if any(not os.path.exists(s) for s in scripts):
+        print("❌ Missing one or more script files. Please ensure all are present.")
         return
         
-    print("✅ All script files found")
-    print("")
-    
-    # Start the process manager
-    manager = TmuxProcessManager()
+    print("✅ All script files found.")
     manager.run()
 
 if __name__ == "__main__":

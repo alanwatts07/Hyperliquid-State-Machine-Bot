@@ -1,4 +1,3 @@
-# db_manager.py
 import sqlite3
 import json
 from datetime import datetime
@@ -31,7 +30,30 @@ class DatabaseManager:
                 details TEXT
             )
         ''')
+        # Stores commands sent from the Discord bot to the trade bot
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS commands (
+                command_name TEXT PRIMARY KEY,
+                status TEXT,
+                timestamp TEXT
+            )
+        ''')
         self.conn.commit()
+
+    def set_command(self, command_name, status):
+        """Sets or updates a command in the database."""
+        self.cursor.execute('''
+            INSERT INTO commands (command_name, status, timestamp) VALUES (?, ?, ?)
+            ON CONFLICT(command_name) DO UPDATE SET status=excluded.status, timestamp=excluded.timestamp
+        ''', (command_name, status, datetime.now().isoformat()))
+        self.conn.commit()
+        print(f"[DB] Set Command: {command_name} -> {status}")
+
+    def get_command(self, command_name):
+        """Gets a command's status from the database."""
+        self.cursor.execute("SELECT status FROM commands WHERE command_name = ?", (command_name,))
+        row = self.cursor.fetchone()
+        return row[0] if row else None
 
     def log_event(self, event_type, details_dict):
         """Logs a new event to the events table."""
@@ -68,8 +90,10 @@ class DatabaseManager:
         return {"asset": row[0], "direction": row[1], "size": row[2], "entry_px": row[3], "status": row[4], "last_update": row[5]}
 
     def get_last_event(self):
-        """Retrieves the most recent event."""
-        self.cursor.execute("SELECT event_type, details FROM events ORDER BY id DESC LIMIT 1")
+        """Retrieves the most recent event from the log."""
+        # The SELECT statement now correctly includes the 'timestamp' column
+        self.cursor.execute("SELECT event_type, details, timestamp FROM events ORDER BY id DESC LIMIT 1")
         row = self.cursor.fetchone()
         if not row: return None
-        return {"event_type": row[0], "details": json.loads(row[1])}
+        # The returned dictionary now correctly includes the 'timestamp' key
+        return {"event_type": row[0], "details": json.loads(row[1]), "timestamp": row[2]}
