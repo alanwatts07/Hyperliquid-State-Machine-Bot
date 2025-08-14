@@ -55,6 +55,36 @@ def read_last_savant_record():
         print(f"[!] Error in read_last_savant_record: {e}")
         return None
 
+def format_event_details(event_type, details):
+    """Translates raw event data into a pretty, human-readable string."""
+    try:
+        if event_type in ["TRIGGER_ARMED", "TRIGGER_DISARMED", "BUY_SIGNAL"]:
+            price = details.get("savant_data", {}).get("price", 0)
+            return f"Market price was ${price:.3f}"
+        
+        elif event_type == "TRADE_EXECUTED":
+            asset, size, avg_px = details.get('asset'), details.get('size'), details.get('avg_px')
+            return f"Bought {size:.4f} {asset} @ ${avg_px:,.2f}"
+            
+        elif event_type in ["STOP-LOSS_HIT", "TAKE-PROFIT_HIT"]:
+            asset, size, roe = details.get('asset'), details.get('size'), details.get('roe')
+            return f"Closed {size:.4f} {asset} @ {roe:.2%} ROE"
+
+        elif event_type == "COMMAND_EXECUTED":
+            command = details.get("command")
+            count = details.get("closed_count", 0)
+            return f"Command '{command}' executed, closed {count} position(s)."
+
+        elif event_type in ["BOT_STARTED", "BOT_STOPPED"]:
+            return details.get("message", "No details.")
+        
+        else:
+            # Fallback for any other event types
+            details_str = json.dumps(details)
+            return (details_str[:200] + '...') if len(details_str) > 200 else details_str
+            
+    except Exception:
+        return "Could not parse details."
 # --- Background Tasks ---
 
 @tasks.loop(seconds=10)
@@ -189,6 +219,38 @@ async def confirm_close(ctx):
         await ctx.send("✅ **Confirmation received!** Signal sent to the trading bot to close all positions.")
     else:
         await ctx.send("⚠️ No pending close command found. Please run `!panic` first.")
+
+@bot.command(name='logs')
+
+async def logs(ctx, limit: int = 10):
+    """Fetches and displays the last N events from the bot's database."""
+    if limit > 25: limit = 25
+        
+    await ctx.send(f"📜 Fetching the last {limit} bot events...")
+    
+    events = db.get_latest_events(limit)
+    
+    if not events:
+        await ctx.send("No events found in the database.")
+        return
+        
+    embed = discord.Embed(
+        title="📜 Recent Bot Events",
+        color=0x7289DA # Discord Blurple
+    )
+    
+    description = ""
+    for event in reversed(events): # Reverse to show oldest first
+        ts = datetime.fromisoformat(event['timestamp']).strftime('%H:%M:%S')
+        event_type = event['event_type']
+        
+        # Use the new formatter function here
+        details_str = format_event_details(event_type, event['details'])
+            
+        description += f"`{ts}` **{event_type}**\n` > ` {details_str}\n"
+    
+    embed.description = description
+    await ctx.send(embed=embed)
 
 @bot.event
 async def on_command_error(ctx, error):

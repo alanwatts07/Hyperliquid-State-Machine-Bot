@@ -97,3 +97,18 @@ class DatabaseManager:
         if not row: return None
         # The returned dictionary now correctly includes the 'timestamp' key
         return {"event_type": row[0], "details": json.loads(row[1]), "timestamp": row[2]}
+    
+    def get_latest_events(self, limit=10):
+        """Retrieves the most recent events from the log, up to a specified limit."""
+        self.cursor.execute("SELECT timestamp, event_type, details FROM events ORDER BY id DESC LIMIT ?", (limit,))
+        rows = self.cursor.fetchall()
+        if not rows: return []
+        
+        events = []
+        for row in rows:
+            events.append({
+                "timestamp": row[0],
+                "event_type": row[1],
+                "details": json.loads(row[2])
+            })
+        return events
