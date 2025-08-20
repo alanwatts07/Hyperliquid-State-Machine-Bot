@@ -4,7 +4,7 @@ example_utils.py
 __pycache__/
 venv/
 *.pyc
-
+jupiter_bot/
 # Data & Logs - IMPORTANT!
 *.json
 *.log

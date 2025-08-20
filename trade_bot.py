@@ -14,13 +14,18 @@ CHECK_INTERVAL_SECONDS = 5
 TRADE_USD_SIZE = 625
 TRADE_ASSET = "SOL"
 TRADE_COOLDOWN_MINUTES = 10
-STOP_LOSS_PERCENTAGE = 0.15
-TAKE_PROFIT_PERCENTAGE = 0.30
+STOP_LOSS_PERCENTAGE = 0.45
+TAKE_PROFIT_PERCENTAGE = 1.59
+
+# --- Trailing Stop Configuration ---
+TRAILING_ACTIVATION_PERCENTAGE = 0.50  # Activate trailing stop at 50% gain
+TRAILING_STOP_DISTANCE = 0.25  # Trail by 25% from peak
 
 # --- State Tracking ---
 last_traded_signal_timestamp = None
 last_known_trigger_state = None
 last_trade_time = None
+position_peaks = {}  # Track peak ROE for each position
 
 # --- Helper Functions ---
 def load_config():
@@ -61,9 +66,65 @@ def read_last_savant_record():
         print(f"[!] Error in read_last_savant_record: {e}")
         return None
 
+def manage_trailing_stop(asset, current_roe, db):
+    """
+    Manages trailing stop loss logic.
+    Returns (should_close, reason, stop_level) tuple.
+    """
+    global position_peaks
+    
+    # Initialize peak tracking for new position
+    if asset not in position_peaks:
+        position_peaks[asset] = {
+            'peak_roe': current_roe,
+            'trailing_active': False,
+            'stop_level': -STOP_LOSS_PERCENTAGE
+        }
+    
+    peak_data = position_peaks[asset]
+    
+    # Update peak ROE if current is higher
+    if current_roe > peak_data['peak_roe']:
+        peak_data['peak_roe'] = current_roe
+        
+        # Activate trailing stop if threshold reached
+        if current_roe >= TRAILING_ACTIVATION_PERCENTAGE and not peak_data['trailing_active']:
+            peak_data['trailing_active'] = True
+            peak_data['stop_level'] = current_roe - TRAILING_STOP_DISTANCE
+            print(f"[*] Trailing stop ACTIVATED for {asset} at {current_roe:.2%} gain")
+            print(f"    Initial stop level: {peak_data['stop_level']:.2%}")
+            db.log_event("TRAILING_STOP_ACTIVATED", {
+                "asset": asset, 
+                "activation_roe": current_roe,
+                "stop_level": peak_data['stop_level']
+            })
+        
+        # Update trailing stop level if already active
+        elif peak_data['trailing_active']:
+            new_stop_level = current_roe - TRAILING_STOP_DISTANCE
+            if new_stop_level > peak_data['stop_level']:
+                peak_data['stop_level'] = new_stop_level
+                print(f"[*] Trailing stop UPDATED for {asset}: Stop at {peak_data['stop_level']:.2%}")
+    
+    # Check if any stop condition is met
+    if peak_data['trailing_active']:
+        # Use trailing stop
+        if current_roe <= peak_data['stop_level']:
+            return True, "TRAILING-STOP", peak_data['stop_level']
+    else:
+        # Use fixed stop loss
+        if current_roe <= -STOP_LOSS_PERCENTAGE:
+            return True, "STOP-LOSS", -STOP_LOSS_PERCENTAGE
+    
+    # Check take profit
+    if current_roe >= TAKE_PROFIT_PERCENTAGE:
+        return True, "TAKE-PROFIT", TAKE_PROFIT_PERCENTAGE
+    
+    return False, None, None
+
 # --- MAIN EXECUTION ---
 def main():
-    global last_traded_signal_timestamp, last_known_trigger_state, last_trade_time
+    global last_traded_signal_timestamp, last_known_trigger_state, last_trade_time, position_peaks
     
     db = DatabaseManager()
     
@@ -73,7 +134,11 @@ def main():
         print(f"[*] Wallet: {address}")
         
         db.log_event("BOT_STARTED", {"message": "Trading bot has started."})
-        print(f"\n[*] Bot running... SL: {STOP_LOSS_PERCENTAGE:.0%}, TP: {TAKE_PROFIT_PERCENTAGE:.0%}")
+        print(f"\n[*] Bot Configuration:")
+        print(f"    Fixed SL: {STOP_LOSS_PERCENTAGE:.0%}")
+        print(f"    Take Profit: {TAKE_PROFIT_PERCENTAGE:.0%}")
+        print(f"    Trailing Activation: {TRAILING_ACTIVATION_PERCENTAGE:.0%} gain")
+        print(f"    Trailing Distance: {TRAILING_STOP_DISTANCE:.0%}")
         print("-" * 50)
 
         while True:
@@ -97,41 +162,71 @@ def main():
                         
                         exchange.market_open(asset, size < 0, abs(size), None, 0.01)
                         db.update_position(asset, "N/A", 0, 0, "CLOSED")
+                        
+                        # Clear position tracking
+                        if asset in position_peaks:
+                            del position_peaks[asset]
                     
                     db.log_event("COMMAND_EXECUTED", {"command": "CLOSE_ALL", "closed_count": len(open_positions)})
-                    db.set_command("CLOSE_ALL", "EXECUTED") # Mark as done
+                    db.set_command("CLOSE_ALL", "EXECUTED")
                     
                     print("[*] All positions closed. Activating cooldown.")
                     last_trade_time = datetime.now()
             except Exception as e:
                 print(f"[!] Error during command check: {e}")
 
-            # Position Management (SL/TP)
+            # Position Management with Trailing Stop
             try:
                 user_state = info.user_state(address)
                 positions = user_state.get("assetPositions", [])
+                
                 for pos in positions:
                     pos_info = pos["position"]
+                    if float(pos_info["szi"]) == 0:
+                        continue
+                        
+                    asset = pos_info["coin"]
                     roe = float(pos_info["returnOnEquity"])
-                    should_close, reason = False, ""
-
-                    if roe <= -STOP_LOSS_PERCENTAGE:
-                        should_close, reason = True, "STOP-LOSS"
-                    elif roe >= TAKE_PROFIT_PERCENTAGE:
-                        should_close, reason = True, "TAKE-PROFIT"
-
+                    size = float(pos_info["szi"])
+                    
+                    # Check trailing stop logic
+                    should_close, reason, stop_level = manage_trailing_stop(asset, roe, db)
+                    
                     if should_close:
-                        asset, size = pos_info["coin"], float(pos_info["szi"])
-                        print(f"\n[!!] {reason} TRIGGERED for {asset}! ROE: {roe:.2%}")
+                        print(f"\n[!!] {reason} TRIGGERED for {asset}!")
+                        print(f"     Current ROE: {roe:.2%}")
+                        if asset in position_peaks:
+                            print(f"     Peak ROE: {position_peaks[asset]['peak_roe']:.2%}")
+                            if reason == "TRAILING-STOP":
+                                print(f"     Stop Level: {stop_level:.2%}")
                         
                         exchange.market_open(asset, size < 0, abs(size), None, 0.01)
                         db.update_position(asset, "N/A", 0, 0, "CLOSED")
-                        db.log_event(f"{reason}_HIT", {"asset": asset, "size": abs(size), "roe": roe})
+                        
+                        # Log detailed close information
+                        close_data = {
+                            "asset": asset, 
+                            "size": abs(size), 
+                            "roe": roe,
+                            "reason": reason
+                        }
+                        if asset in position_peaks:
+                            close_data["peak_roe"] = position_peaks[asset]['peak_roe']
+                            close_data["trailing_active"] = position_peaks[asset]['trailing_active']
+                            del position_peaks[asset]
+                        
+                        db.log_event(f"{reason}_HIT", close_data)
                         
                         print("[*] Position closed. Activating trade cooldown.")
                         last_trade_time = datetime.now()
                         time.sleep(5)
                         break
+                        
+                    # Display position status periodically
+                    elif asset in position_peaks and position_peaks[asset]['trailing_active']:
+                        if int(time.time()) % 30 == 0:  # Every 30 seconds
+                            print(f"[~] {asset}: ROE {roe:.2%} | Peak {position_peaks[asset]['peak_roe']:.2%} | Stop at {position_peaks[asset]['stop_level']:.2%}")
+                            
             except Exception as e:
                 print(f"[!] Error during position management: {e}")
 

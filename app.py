@@ -466,4 +466,4 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         return fig, f"Error: {e}", trade_state
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=8050)
