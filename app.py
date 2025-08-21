@@ -25,8 +25,13 @@ import plotly.graph_objects as go
 import pandas as pd
 import json
 import os
+import sys
 from datetime import datetime
 import numpy as np
+
+# Import port management
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from port_manager import port_manager
 
 # --- Configuration ---
 DATA_FILE = "price_data.json"
@@ -465,5 +470,34 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         fig = go.Figure().update_layout(title_text=f"Waiting for data... ({e})", template='plotly_dark')
         return fig, f"Error: {e}", trade_state
 
+# --- Enhanced startup with port management ---
 if __name__ == '__main__':
-    app.run(debug=True, port=8050)
+    # Clean up any stale port reservations
+    port_manager.cleanup_stale_reservations()
+    
+    # Reserve a port for this bot
+    bot_name = "main_bot"
+    port = port_manager.reserve_port(bot_name)
+    
+    print(f"🚀 Starting Main Trading Bot Dashboard on port {port}")
+    print(f"🌐 Access at: http://localhost:{port}")
+    print(f"📊 Tracking: {COIN_TO_TRACK}")
+    print(f"🔄 Refresh rate: {APP_REFRESH_SECONDS} seconds")
+    print("=" * 60)
+    
+    try:
+        app.run(
+            host='127.0.0.1',
+            port=port,
+            debug=False,  # Set to False for production
+            use_reloader=False,  # Prevents port conflicts
+            threaded=True
+        )
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down Main Trading Bot Dashboard...")
+    except Exception as e:
+        print(f"\n❌ Error running dashboard: {e}")
+    finally:
+        # Release the port when shutting down
+        port_manager.release_port(bot_name)
+        print("🔓 Port released. Dashboard shutdown complete.")

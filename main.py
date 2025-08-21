@@ -15,7 +15,7 @@ import os
 import sys
 import signal
 from datetime import datetime
-
+from port_manager import port_manager
 # --- Configuration ---
 COLLECTOR_SCRIPT = "collector.py"
 DASHBOARD_SCRIPT = "app.py"
@@ -66,7 +66,19 @@ class TmuxProcessManager:
             subprocess.run(['tmux', 'kill-session', '-t', session_name], capture_output=True)
             self.log(f"🗑️  Killed tmux session: {session_name}")
         return True
+
+    def show_dashboard_ports(self):
+        """Show which ports the dashboards are running on"""
+
+        config = port_manager.load_config()
         
+        self.log("🌐 DASHBOARD ACCESS:")
+        if "main_bot" in config:
+            port = config["main_bot"]["port"]
+            self.log(f"   Main Bot Dashboard: http://localhost:{port}")
+        else:
+            self.log("   Main Bot Dashboard: Not running")
+ 
     def start_tmux_process(self, script_name, process_name, session_name):
         """Start a process in a new tmux session"""
         try:
@@ -166,7 +178,8 @@ class TmuxProcessManager:
         """Show current system status"""
         self.log("\n📊 SYSTEM STATUS:")
         self.log("-" * 60)
-        
+        self.show_dashboard_ports()
+
         processes = [
             ("Collector", "🔄 Collecting price data"),
             ("Dashboard", "📈 Generating signals (app.py)"),
