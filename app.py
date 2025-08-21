@@ -19,6 +19,7 @@
 # 4. Run from your terminal: python app.py
 
 import dash
+import requests
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
@@ -456,8 +457,12 @@ def update_chart_and_indicators(n, trade_state, relayout_data):
         }
         with open(SIGNAL_FILE, 'w') as f: 
             json.dump(signal_data, f, indent=4)
-        
-        # --- Incremental update to price_savant.json ---
+        # --- NEW: Send signal to Express server ---
+        try:
+            requests.post('http://localhost:3000/signal', json=signal_data)
+        except requests.exceptions.RequestException as e:
+            print(f"Could not send signal to server: {e}")
+            # --- Incremental update to price_savant.json ---
         update_price_savant_incremental(data, df_with_fibs, new_state)
         
         return fig, indicator_text, new_state
