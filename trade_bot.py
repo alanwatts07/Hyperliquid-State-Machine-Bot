@@ -71,7 +71,7 @@ def manage_stop_loss(asset, pos_info, db, savant_data, info):
     """
     Manages the stop loss logic for a given position.
     - Uses a fixed percentage stop loss initially.
-    - Switches to a trailing stop using wma_fib_0 once it crosses the entry price.
+    - Switches to a trailing stop using wma_fib_0 once fib_entry crosses the entry price.
     - Also handles the take profit condition.
 
     Returns (should_close, reason, value) tuple.
@@ -82,7 +82,10 @@ def manage_stop_loss(asset, pos_info, db, savant_data, info):
     roe = float(pos_info["returnOnEquity"])
     entry_price = float(pos_info["entryPx"])
     current_price = float(info.all_mids().get(asset, 0))
+    
+    # --- MODIFIED LOGIC: Extract both wma_fib_0 and the new trigger, fib_entry ---
     wma_fib_0 = savant_data.get("wma_fib_0") if savant_data else None
+    fib_entry = savant_data.get("fib_entry") if savant_data else None
 
     # Initialize tracking for a new position
     if asset not in position_data:
@@ -93,23 +96,24 @@ def manage_stop_loss(asset, pos_info, db, savant_data, info):
         print(f"[*] New position detected for {asset}. Entry: ${entry_price:,.2f}. Monitoring...")
         db.log_event("NEW_POSITION_MONITORING", {"asset": asset, "entry_price": entry_price})
 
-
     asset_state = position_data[asset]
 
     # --- Main Stop Logic ---
 
-    # 1. Check if we should activate or update the Fibonacci trailing stop
-    if wma_fib_0 is not None and wma_fib_0 > entry_price:
+    # --- MODIFIED LOGIC: The trigger condition now watches for `fib_entry` to cross the `entry_price` ---
+    # 1. Check if we should activate the Fibonacci trailing stop.
+    #    The stop itself is still `wma_fib_0`, but the trigger is `fib_entry`.
+    if fib_entry is not None and wma_fib_0 is not None and fib_entry > entry_price:
         if not asset_state['fib_stop_active']:
             asset_state['fib_stop_active'] = True
-            asset_state['stop_price'] = wma_fib_0
-            print(f"[*] FIB-TRAIL ACTIVATED for {asset}. wma_fib_0 (${wma_fib_0:,.2f}) > entry (${entry_price:,.2f}).")
-            print(f"    Initial Stop Price set to: ${wma_fib_0:,.2f}")
+            asset_state['stop_price'] = wma_fib_0  # Set the stop loss to the wma_fib_0 value
+            print(f"[*] FIB-TRAIL ACTIVATED for {asset}. fib_entry (${fib_entry:,.2f}) > entry (${entry_price:,.2f}).")
+            print(f"    Initial Stop Price set to wma_fib_0: ${wma_fib_0:,.2f}")
             db.log_event("FIB_STOP_ACTIVATED", {
                 "asset": asset,
-                "wma_fib_0": wma_fib_0,
+                "trigger_value_fib_entry": fib_entry,
+                "wma_fib_0_stop_price": wma_fib_0,
                 "entry_price": entry_price,
-                "initial_stop_price": wma_fib_0
             })
         # If already active, only move the stop up, never down
         elif wma_fib_0 > asset_state['stop_price']:
@@ -119,7 +123,7 @@ def manage_stop_loss(asset, pos_info, db, savant_data, info):
 
     # 2. Check if any stop condition is met
     if asset_state['fib_stop_active']:
-        # Use the Fibonacci trailing stop price
+        # Use the Fibonacci trailing stop price (`wma_fib_0`)
         if current_price <= asset_state['stop_price']:
             return True, "FIB-TRAIL-STOP", asset_state['stop_price']
     else:
@@ -149,7 +153,7 @@ def main():
         print(f"\n[*] Bot Configuration:")
         print(f"    Fixed SL: {STOP_LOSS_PERCENTAGE:.2%}")
         print(f"    Take Profit: {TAKE_PROFIT_PERCENTAGE:.2%}")
-        print(f"    Fib Trailing Stop: Activates when wma_fib_0 > entry price")
+        print(f"    Fib Trailing Stop: Activates when fib_entry > entry price")
         print("-" * 50)
 
         while True:
@@ -241,7 +245,7 @@ def main():
                         if state['fib_stop_active']:
                             print(f"[~] {asset}: ROE {float(pos_info['returnOnEquity']):.2%} | Fib Stop Active @ ${state['stop_price']:,.2f}")
                         else:
-                            print(f"[~] {asset}: ROE {float(pos_info['returnOnEquity']):.2%} | Awaiting Fib Stop Activation")
+                            print(f"[~] {asset}: ROE {float(pos_info['returnOnEquity']):.2%} | Awaiting Fib Stop Activation (fib_entry > entry)")
 
 
             except Exception as e:
