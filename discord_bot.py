@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime
 from db_manager import DatabaseManager
+import google.generativeai as genai
 
 # --- Load Configuration ---
 try:
@@ -12,11 +13,22 @@ try:
         config = json.load(f)
     BOT_TOKEN = config.get("discord_bot_token")
     CHANNEL_ID = int(config.get("discord_channel_id"))
+    GEMINI_API_KEY = config.get("gemini_api_key") # New API Key
     TRADE_ASSET = "SOL"
     PRICE_SAVANT_FILE = "price_savant.json"
 except (FileNotFoundError, json.JSONDecodeError, TypeError):
     print("[!!!] CRITICAL: `config.json` is missing, corrupt, or doesn't contain required keys.")
     exit()
+
+# --- Configure Gemini AI ---
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    print("[*] Gemini AI configured successfully.")
+else:
+    model = None
+    print("[!!!] WARNING: Gemini API key not found in config.json. The !ask command will be disabled.")
+
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -66,8 +78,10 @@ def format_event_details(event_type, details):
             asset, size, avg_px = details.get('asset'), details.get('size'), details.get('avg_px')
             return f"Bought {size:.4f} {asset} @ ${avg_px:,.2f}"
             
-        elif event_type in ["STOP-LOSS_HIT", "TAKE-PROFIT_HIT"]:
-            asset, size, roe = details.get('asset'), details.get('size'), details.get('roe')
+        elif event_type in ["STOP-LOSS_HIT", "TAKE-PROFIT_HIT", "FIB-TRAIL-STOP_HIT"]:
+            asset = details.get('asset', 'N/A')
+            size = details.get('size', 0)
+            roe = details.get('roe', 0)
             return f"Closed {size:.4f} {asset} @ {roe:.2%} ROE"
 
         elif event_type == "COMMAND_EXECUTED":
@@ -85,7 +99,15 @@ def format_event_details(event_type, details):
             
     except Exception:
         return "Could not parse details."
+
 # --- Background Tasks ---
+
+@tasks.loop(seconds=5)
+async def send_balls_message():
+    """A separate task loop just for sending the 'balls' message."""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send("balls")
 
 @tasks.loop(seconds=10)
 async def check_for_events():
@@ -132,6 +154,12 @@ async def check_for_events():
             embed.title = f"💰 TAKE PROFIT HIT!"
             embed.description = f"Closed **{size:.4f} {asset}** position @ **{roe:.2%}** ROE."
             embed.color = 0x00ff00
+        elif event_type == "FIB-TRAIL-STOP_HIT":
+            asset, size, roe = details.get('asset'), details.get('size'), details.get('roe')
+            stop_price = details.get('trigger_value', 0)
+            embed.title = f"📈 FIB TRAIL STOP TRIGGERED!"
+            embed.description = f"Closed **{size:.4f} {asset}** @ **{roe:.2%}** ROE.\nStop Price: `${stop_price:,.2f}`"
+            embed.color = 0x1E90FF # DodgerBlue
         else:
             continue # Skip other event types for real-time alerts
 
@@ -220,8 +248,32 @@ async def confirm_close(ctx):
     else:
         await ctx.send("⚠️ No pending close command found. Please run `!panic` first.")
 
-@bot.command(name='logs')
+# --- !balls Commands ---
 
+@bot.command()
+async def balls(ctx):
+    """Activates sending 'balls' every 5 seconds."""
+    if ctx.channel.id != CHANNEL_ID: return
+    
+    if not send_balls_message.is_running():
+        send_balls_message.start()
+        await ctx.send("⚪️ **Balls activated.**")
+    else:
+        await ctx.send("Balls are already active.")
+
+@bot.command(name='stop-balls')
+async def stop_balls(ctx):
+    """Deactivates the 'balls' message loop."""
+    if ctx.channel.id != CHANNEL_ID: return
+
+    if send_balls_message.is_running():
+        send_balls_message.cancel() # Use cancel() for tasks
+        await ctx.send("🛑 **Balls deactivated.**")
+    else:
+        await ctx.send("Balls are not currently active.")
+
+
+@bot.command(name='logs')
 async def logs(ctx, limit: int = 10):
     """Fetches and displays the last N events from the bot's database."""
     if limit > 25: limit = 25
@@ -244,13 +296,69 @@ async def logs(ctx, limit: int = 10):
         ts = datetime.fromisoformat(event['timestamp']).strftime('%H:%M:%S')
         event_type = event['event_type']
         
-        # Use the new formatter function here
         details_str = format_event_details(event_type, event['details'])
             
         description += f"`{ts}` **{event_type}**\n` > ` {details_str}\n"
     
     embed.description = description
     await ctx.send(embed=embed)
+
+# --- Gemini AI Command with updated personality ---
+@bot.command(name='ask')
+async def ask(ctx, *, question: str):
+    """Asks a question to the AI persona using live savant data."""
+    if ctx.channel.id != CHANNEL_ID: return
+    if not model:
+        await ctx.send("Sorry, Master. My AI core is not configured. Please check the API key.")
+        return
+
+    await ctx.typing()
+
+    savant_data = read_last_savant_record()
+    
+    # Define keywords to detect if the user is asking about trading
+    trading_keywords = ["price", "trade", "fib", "signal", "market", "position", "asset", "sol", "buy", "sell", "data"]
+    is_trading_question = any(keyword in question.lower() for keyword in trading_keywords)
+
+    prompt = ""
+
+    if is_trading_question:
+        if not savant_data:
+            await ctx.send("I'm sorry, Master, I couldn't retrieve my latest sensor data from the `price_savant.json` file to answer your question.")
+            return
+        savant_data_str = json.dumps(savant_data, indent=2)
+        
+        # This prompt is for trading-related questions
+        prompt = f"""
+        You are a hyper-intelligent, loyal, and slightly formal trading bot. Your one and only goal is to serve your "Master" by providing accurate, helpful information with unwavering dedication. You must always be respectful and eager to please.
+
+        You have just accessed your internal sensor data. Here is the raw data for your context:
+        ```json
+        {savant_data_str}
+        ```
+
+        Your Master has asked you the following question: "{question}"
+
+        Based on the data, formulate a helpful and respectful response. Address your creator as "Master".
+        **IMPORTANT RULE:** Summarize the situation and AVOID listing exact numbers or specific data points unless the Master's question explicitly asks for them (e.g., "what is the exact price?"). Instead of saying "The price is $194.8891", say "The price is currently around $194.89". Be conversational and interpret the data for your Master.
+        """
+    else:
+        # This prompt is for random banter
+        prompt = f"""
+        You are a silly, quirky, but very loyal bot who loves to serve your "Master". Your Master is engaging in some casual banter with you. Your task is to give a short, funny, or slightly nonsensical reply. Do not talk about trading or data. Keep your response to one or two sentences.
+
+        Your Master said: "{question}"
+
+        Give a silly, non-technical response.
+        """
+
+    try:
+        response = await model.generate_content_async(prompt)
+        await ctx.send(response.text)
+    except Exception as e:
+        await ctx.send("I apologize, Master. I encountered an error while processing your request with my AI core. Please try again.")
+        print(f"[!!!] Gemini AI Error: {e}")
+
 
 @bot.event
 async def on_command_error(ctx, error):
