@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from db_manager import DatabaseManager
+import requests # Added for Discord webhooks
 
 # --- Script Configuration ---
 PRICE_SAVANT_FILE = "price_savant.json"
@@ -21,10 +22,10 @@ TAKE_PROFIT_PERCENTAGE = 2.15
 last_traded_signal_timestamp = None
 last_known_trigger_state = None
 last_trade_time = None
-# Updated position_data to track the state of our new stop logic
 position_data = {}
 
 # --- Helper Functions ---
+
 def load_config():
     """Loads the main config.json file."""
     try:
@@ -34,6 +35,22 @@ def load_config():
         print(f"[!!!] CRITICAL: `{CONFIG_FILE}` not found or corrupt.")
         return None
 
+def send_discord_notification(webhook_url, message=None, embed=None):
+    """Sends a notification to the specified Discord webhook."""
+    if not webhook_url:
+        return # Don't send if webhook is not configured
+    data = {}
+    if message:
+        data["content"] = message
+    if embed:
+        data["embeds"] = [embed]
+    
+    try:
+        response = requests.post(webhook_url, json=data)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Error sending Discord notification: {e}")
+
 def read_last_savant_record():
     """Reads the last complete JSON object from the price_savant.json file."""
     if not os.path.exists(PRICE_SAVANT_FILE): return None
@@ -42,16 +59,13 @@ def read_last_savant_record():
             f.seek(0, os.SEEK_END)
             file_size = f.tell()
             if file_size == 0: return None
-            # Read a larger buffer to ensure we get a full JSON object
             buffer_size = 8192
             seek_pos = max(0, file_size - buffer_size)
             f.seek(seek_pos)
             buffer = f.read().decode('utf-8', errors='ignore')
-            # Find the last '{' to start parsing from a potential JSON object
             last_obj_start = buffer.rfind('{')
             if last_obj_start == -1: return None
             temp_buffer = buffer[last_obj_start:]
-            # Find the matching '}' to ensure the JSON object is complete
             brace_level, last_obj_end = 0, -1
             for i, char in enumerate(temp_buffer):
                 if char == '{': brace_level += 1
@@ -67,76 +81,85 @@ def read_last_savant_record():
         print(f"[!] Error in read_last_savant_record: {e}")
         return None
 
-def manage_stop_loss(asset, pos_info, db, savant_data, info):
+def manage_stop_loss(asset, pos_info, db, savant_data, info, webhook_url):
     """
     Manages the stop loss logic for a given position.
     - Uses a fixed percentage stop loss initially.
-    - Switches to a trailing stop using wma_fib_0 once it crosses the entry price.
+    - Switches to a trailing stop using wma_fib_0 once fib_entry crosses the entry price.
     - Also handles the take profit condition.
 
     Returns (should_close, reason, value) tuple.
     """
     global position_data
 
-    # Extract key info from the position and market data
     roe = float(pos_info["returnOnEquity"])
     entry_price = float(pos_info["entryPx"])
     current_price = float(info.all_mids().get(asset, 0))
     wma_fib_0 = savant_data.get("wma_fib_0") if savant_data else None
+    fib_entry = savant_data.get("fib_entry") if savant_data else None
 
-    # Initialize tracking for a new position
     if asset not in position_data:
         position_data[asset] = {
             'fib_stop_active': False,
-            'stop_price': None, # This will be the price level for our stop
+            'stop_price': None,
         }
         print(f"[*] New position detected for {asset}. Entry: ${entry_price:,.2f}. Monitoring...")
         db.log_event("NEW_POSITION_MONITORING", {"asset": asset, "entry_price": entry_price})
 
-
     asset_state = position_data[asset]
 
-    # --- Main Stop Logic ---
-
-    # 1. Check if we should activate or update the Fibonacci trailing stop
-    if wma_fib_0 is not None and wma_fib_0 > entry_price:
+    if fib_entry is not None and wma_fib_0 is not None and fib_entry > entry_price:
         if not asset_state['fib_stop_active']:
             asset_state['fib_stop_active'] = True
             asset_state['stop_price'] = wma_fib_0
-            print(f"[*] FIB-TRAIL ACTIVATED for {asset}. wma_fib_0 (${wma_fib_0:,.2f}) > entry (${entry_price:,.2f}).")
-            print(f"    Initial Stop Price set to: ${wma_fib_0:,.2f}")
+            print(f"[*] FIB-TRAIL ACTIVATED for {asset}. fib_entry (${fib_entry:,.2f}) > entry (${entry_price:,.2f}).")
+            print(f"    Initial Stop Price set to wma_fib_0: ${wma_fib_0:,.2f}")
+            
+            # --- Discord Notification for Fib Stop Activation ---
+            embed = {
+                "title": "🛡️ Fibonacci Stop Activated",
+                "color": 3447003, # Blue
+                "fields": [
+                    {"name": "Asset", "value": asset, "inline": True},
+                    {"name": "Entry Price", "value": f"${entry_price:,.2f}", "inline": True},
+                    {"name": "Trigger (fib_entry)", "value": f"${fib_entry:,.2f}", "inline": True},
+                    {"name": "Initial Stop Price (wma_fib_0)", "value": f"${wma_fib_0:,.2f}", "inline": False}
+                ],
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            send_discord_notification(webhook_url, embed=embed)
+            
             db.log_event("FIB_STOP_ACTIVATED", {
                 "asset": asset,
-                "wma_fib_0": wma_fib_0,
+                "trigger_value_fib_entry": fib_entry,
+                "wma_fib_0_stop_price": wma_fib_0,
                 "entry_price": entry_price,
-                "initial_stop_price": wma_fib_0
             })
-        # If already active, only move the stop up, never down
         elif wma_fib_0 > asset_state['stop_price']:
             old_stop = asset_state['stop_price']
             asset_state['stop_price'] = wma_fib_0
             print(f"[*] FIB-TRAIL UPDATED for {asset}: Stop moved up from ${old_stop:,.2f} to ${wma_fib_0:,.2f}")
 
-    # 2. Check if any stop condition is met
     if asset_state['fib_stop_active']:
-        # Use the Fibonacci trailing stop price
         if current_price <= asset_state['stop_price']:
             return True, "FIB-TRAIL-STOP", asset_state['stop_price']
     else:
-        # Use the initial fixed percentage stop loss
         if roe <= -STOP_LOSS_PERCENTAGE:
             return True, "STOP-LOSS", f"{roe:.2%}"
 
-    # 3. Check for take profit, which is always active
     if roe >= TAKE_PROFIT_PERCENTAGE:
         return True, "TAKE-PROFIT", f"{roe:.2%}"
 
     return False, None, None
 
-
 # --- MAIN EXECUTION ---
 def main():
     global last_traded_signal_timestamp, last_known_trigger_state, last_trade_time, position_data
+
+    config = load_config()
+    if not config:
+        return
+    webhook_url = config.get("discord_webhook_url")
 
     db = DatabaseManager()
 
@@ -146,50 +169,17 @@ def main():
         print(f"[*] Wallet: {address}")
 
         db.log_event("BOT_STARTED", {"message": "Trading bot has started."})
+        send_discord_notification(webhook_url, message="✅ **Trading Bot Started**")
+        
         print(f"\n[*] Bot Configuration:")
         print(f"    Fixed SL: {STOP_LOSS_PERCENTAGE:.2%}")
         print(f"    Take Profit: {TAKE_PROFIT_PERCENTAGE:.2%}")
-        print(f"    Fib Trailing Stop: Activates when wma_fib_0 > entry price")
+        print(f"    Fib Trailing Stop: Activates when fib_entry > entry price")
         print("-" * 50)
 
         while True:
-            # Command & Control Check
-            try:
-                command_status = db.get_command("CLOSE_ALL")
-                if command_status == "CONFIRMED":
-                    print("\n[!!!] CLOSE ALL COMMAND RECEIVED FROM DISCORD!")
-
-                    user_state = info.user_state(address)
-                    positions = user_state.get("assetPositions", [])
-                    open_positions = [p for p in positions if float(p["position"]["szi"]) != 0]
-
-                    if not open_positions:
-                        print("[*] Close command received, but no positions were open.")
-
-                    for pos in open_positions:
-                        pos_info = pos["position"]
-                        asset, size = pos_info["coin"], float(pos_info["szi"])
-                        print(f"[*] Closing {asset} position of size {size}...")
-
-                        exchange.market_open(asset, size < 0, abs(size), None, 0.01)
-                        db.update_position(asset, "N/A", 0, 0, "CLOSED")
-
-                        # Clear position tracking
-                        if asset in position_data:
-                            del position_data[asset]
-
-                    db.log_event("COMMAND_EXECUTED", {"command": "CLOSE_ALL", "closed_count": len(open_positions)})
-                    db.set_command("CLOSE_ALL", "EXECUTED")
-
-                    print("[*] All positions closed. Activating cooldown.")
-                    last_trade_time = datetime.now()
-            except Exception as e:
-                print(f"[!] Error during command check: {e}")
-
-            # Read savant data once per loop iteration before managing positions
             latest_record = read_last_savant_record()
 
-            # Position Management
             try:
                 user_state = info.user_state(address)
                 positions = user_state.get("assetPositions", [])
@@ -197,68 +187,52 @@ def main():
                 for pos in positions:
                     pos_info = pos["position"]
                     if float(pos_info["szi"]) == 0:
-                        # If a position is closed, ensure we clean up its tracking data
                         if pos_info["coin"] in position_data:
                             del position_data[pos_info["coin"]]
                         continue
 
                     asset = pos_info["coin"]
                     size = float(pos_info["szi"])
+                    entry_px = float(pos_info["entryPx"])
+                    roe = float(pos_info['returnOnEquity'])
 
-                    # Pass all necessary data to the stop loss manager
-                    should_close, reason, value = manage_stop_loss(asset, pos_info, db, latest_record, info)
+                    should_close, reason, value = manage_stop_loss(asset, pos_info, db, latest_record, info, webhook_url)
 
                     if should_close:
                         print(f"\n[!!] {reason} TRIGGERED for {asset}!")
-                        print(f"     Current ROE: {float(pos_info['returnOnEquity']):.2%}")
+                        print(f"     Current ROE: {roe:.2%}")
                         print(f"     Trigger Value: {value}")
 
                         exchange.market_open(asset, size < 0, abs(size), None, 0.01)
                         db.update_position(asset, "N/A", 0, 0, "CLOSED")
 
-                        # Log detailed close information
-                        close_data = {
-                            "asset": asset,
-                            "size": abs(size),
-                            "roe": float(pos_info['returnOnEquity']),
-                            "reason": reason,
-                            "trigger_value": value
+                        # --- Discord Notification for Position Close ---
+                        color = 15158332 if "STOP" in reason else 3066993 # Red for stop, Green for profit
+                        embed = {
+                            "title": f"🔒 Position Closed: {reason}",
+                            "color": color,
+                            "fields": [
+                                {"name": "Asset", "value": asset, "inline": True},
+                                {"name": "Size", "value": str(abs(size)), "inline": True},
+                                {"name": "Final ROE", "value": f"{roe:.2%}", "inline": True},
+                                {"name": "Entry Price", "value": f"${entry_px:,.2f}", "inline": True},
+                                {"name": "Trigger Value", "value": str(value), "inline": True},
+                            ],
+                            "timestamp": datetime.utcnow().isoformat()
                         }
+                        send_discord_notification(webhook_url, embed=embed)
+
                         if asset in position_data:
-                            close_data.update(position_data[asset])
-                            del position_data[asset] # Clean up state
+                            del position_data[asset]
 
-                        db.log_event(f"{reason}_HIT", close_data)
-
-                        print("[*] Position closed. Activating trade cooldown.")
                         last_trade_time = datetime.now()
-                        time.sleep(5) # Brief pause to allow systems to update
-                        break # Exit loop to re-fetch positions
-
-                    # Display position status periodically
-                    elif asset in position_data and int(time.time()) % 30 == 0: # Every 30 seconds
-                        state = position_data[asset]
-                        if state['fib_stop_active']:
-                            print(f"[~] {asset}: ROE {float(pos_info['returnOnEquity']):.2%} | Fib Stop Active @ ${state['stop_price']:,.2f}")
-                        else:
-                            print(f"[~] {asset}: ROE {float(pos_info['returnOnEquity']):.2%} | Awaiting Fib Stop Activation")
-
+                        time.sleep(5)
+                        break
 
             except Exception as e:
                 print(f"[!] Error during position management: {e}")
 
-            # Signal Monitoring & Event Logging
             if latest_record:
-                # Detect and log trigger state changes
-                current_trigger_armed = latest_record.get('trigger_armed')
-                if current_trigger_armed is not None and current_trigger_armed != last_known_trigger_state:
-                    if current_trigger_armed:
-                        db.log_event("TRIGGER_ARMED", {"savant_data": latest_record})
-                    else:
-                        db.log_event("TRIGGER_DISARMED", {"savant_data": latest_record})
-                    last_known_trigger_state = current_trigger_armed
-
-                # Check for a new buy signal to trade on
                 if latest_record.get('buy_signal') and latest_record.get('timestamp') != last_traded_signal_timestamp:
                     if last_trade_time and (datetime.now() - last_trade_time) < timedelta(minutes=TRADE_COOLDOWN_MINUTES):
                         last_traded_signal_timestamp = latest_record.get('timestamp')
@@ -271,7 +245,6 @@ def main():
                     market_price = float(info.all_mids()[coin])
                     order_size = round(TRADE_USD_SIZE / market_price, sz_decimals)
 
-                    db.log_event("BUY_SIGNAL", {"savant_data": latest_record})
                     order_result = exchange.market_open(coin, True, order_size, None, 0.01)
 
                     if order_result.get("status") == "ok":
@@ -279,23 +252,39 @@ def main():
                         avg_px = float(filled_order['avgPx'])
 
                         db.update_position(coin, "LONG", order_size, avg_px, "OPEN")
-                        db.log_event("TRADE_EXECUTED", {"asset": coin, "size": order_size, "avg_px": avg_px})
-
                         print(f"[*] Trade Executed: Bought {order_size} {coin} @ ${avg_px:,.2f}")
+
+                        # --- Discord Notification for New Trade ---
+                        embed = {
+                            "title": "🚀 New Trade Executed",
+                            "color": 3066993, # Green
+                            "fields": [
+                                {"name": "Asset", "value": coin, "inline": True},
+                                {"name": "Side", "value": "LONG", "inline": True},
+                                {"name": "Size", "value": str(order_size), "inline": True},
+                                {"name": "Average Price", "value": f"${avg_px:,.2f}", "inline": True},
+                                {"name": "Value", "value": f"${(order_size * avg_px):,.2f}", "inline": True},
+                            ],
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                        send_discord_notification(webhook_url, embed=embed)
+
                         last_traded_signal_timestamp = latest_record.get('timestamp')
                         last_trade_time = datetime.now()
                     else:
-                        db.log_event("TRADE_FAILED", {"reason": str(order_result)})
                         print("[!] Trade Failed!")
+                        send_discord_notification(webhook_url, message=f"❌ **Trade Failed!** Reason: `{str(order_result)}`")
 
             time.sleep(CHECK_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:
-        db.log_event("BOT_STOPPED", {"message": "Bot stopped by user."})
         print("\n[*] Bot stopped by user.")
+        db.log_event("BOT_STOPPED", {"message": "Bot stopped by user."})
+        send_discord_notification(webhook_url, message="🛑 **Trading Bot Stopped by user.**")
     except Exception as e:
         print(f"[!!!] CRITICAL ERROR: {e}")
         db.log_event("CRITICAL_ERROR", {"error": str(e)})
+        send_discord_notification(webhook_url, message=f"🚨 **CRITICAL ERROR!**\n```{e}```")
 
 if __name__ == "__main__":
     main()
