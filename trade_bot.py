@@ -92,11 +92,16 @@ def manage_stop_loss(asset, pos_info, db, savant_data, info):
         position_data[asset] = {
             'fib_stop_active': False,
             'stop_price': None, # This will be the price level for our stop
+            'fib_stop_hit_logged': False,  # Add flag to prevent duplicate logging
         }
         print(f"[*] New position detected for {asset}. Entry: ${entry_price:,.2f}. Monitoring...")
         db.log_event("NEW_POSITION_MONITORING", {"asset": asset, "entry_price": entry_price})
 
     asset_state = position_data[asset]
+    
+    # Add the flag if it doesn't exist (for existing positions)
+    if 'fib_stop_hit_logged' not in asset_state:
+        asset_state['fib_stop_hit_logged'] = False
 
     # --- Main Stop Logic ---
 
@@ -125,15 +130,27 @@ def manage_stop_loss(asset, pos_info, db, savant_data, info):
     if asset_state['fib_stop_active']:
         # Use the Fibonacci trailing stop price (`wma_fib_0`)
         if current_price <= asset_state['stop_price']:
-            return True, "FIB-TRAIL-STOP", asset_state['stop_price']
+            # Log the fib stop hit immediately when detected, but only once
+            if not asset_state['fib_stop_hit_logged']:
+                db.log_event("FIB_STOP_HIT", {
+                    "asset": asset,
+                    "current_price": current_price,
+                    "stop_price": asset_state['stop_price'],
+                    "roe": roe,
+                    "entry_price": entry_price
+                })
+                asset_state['fib_stop_hit_logged'] = True
+                print(f"[!!] FIB-STOP HIT for {asset}! Current: ${current_price:,.2f} <= Stop: ${asset_state['stop_price']:,.2f}")
+            
+            return True, "FIB_STOP", asset_state['stop_price']
     else:
         # Use the initial fixed percentage stop loss
         if roe <= -STOP_LOSS_PERCENTAGE:
-            return True, "STOP-LOSS", f"{roe:.2%}"
+            return True, "STOP_LOSS", f"{roe:.2%}"
 
     # 3. Check for take profit, which is always active
     if roe >= TAKE_PROFIT_PERCENTAGE:
-        return True, "TAKE-PROFIT", f"{roe:.2%}"
+        return True, "TAKE_PROFIT", f"{roe:.2%}"
 
     return False, None, None
 
